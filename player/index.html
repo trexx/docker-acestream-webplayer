@@ -19,10 +19,8 @@
   <script>
     const acestreamInput = document.getElementById('acestreamId');
     const videoElement = document.getElementById('videoElement');
-    
-    let streamUrl = '';
     let player = null;
-
+ 
     acestreamInput.value = localStorage.getItem('acestreamId') || '';
 
     acestreamInput.addEventListener('keypress', function(event) {
@@ -31,9 +29,10 @@
       if (event.key === 'Enter' && acestreamId) {
         const acestreamId = acestreamInput.value.trim();
         const hostname = window.location.hostname;
+        const streamUrlts = `http://${hostname}/ace/getstream?id=${acestreamId}`;
+        const streamUrlhls = `http://${hostname}/ace/getstream?id=${acestreamId}`;
 
         localStorage.setItem('acestreamId', acestreamId);
-        streamUrl = `http://${hostname}/ace/getstream?id=${acestreamId}`;
         
         if (player) {
           player.destroy();
