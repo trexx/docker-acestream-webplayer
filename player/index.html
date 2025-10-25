@@ -1,6 +1,5 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,7 +7,6 @@
   <script src="mpegts.js"></script>
   <link rel="icon" href="data:,">
 </head>
-
 <body>
   <label for="acestreamId">AceStream ID</label>
   <input type="text" id="acestreamId">
@@ -30,34 +28,37 @@
         const acestreamId = acestreamInput.value.trim();
         const hostname = window.location.hostname;
         const streamUrlts = `http://${hostname}/ace/getstream?id=${acestreamId}`;
-        const streamUrlhls = `http://${hostname}/ace/getstream?id=${acestreamId}`;
+        const streamUrlhls = `http://${hostname}/ace/manifest.m3u8?id=${acestreamId}`;
 
         localStorage.setItem('acestreamId', acestreamId);
-        
-        if (player) {
-          player.destroy();
-          player = null;
-        }
 
-        if (streamUrl && mpegts.getFeatureList().mseLivePlayback) {
-          player = mpegts.createPlayer({
-            type: 'mse',
-            isLive: true,
-            url: streamUrl
-          }, {
-            enableWorker: true,
-            enableStashBuffer: false,
-            isLive: true
-          });
-          
-          player.attachMediaElement(videoElement);    
-          player.load();
-          player.play();
+        if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+          videoElement.src = streamUrlhls;
+          videoElement.play();
+        } else {
+          if (player) {
+            player.destroy();
+            player = null;
+          }
+
+          if (streamUrl && mpegts.getFeatureList().mseLivePlayback) {
+            player = mpegts.createPlayer({
+              type: 'mse',
+              isLive: true,
+              url: streamUrlts
+            }, {
+              enableWorker: true,
+              enableStashBuffer: false,
+              isLive: true
+            });
+            
+            player.attachMediaElement(videoElement);    
+            player.load();
+            player.play();
+          }
         }
       }
     });
-
   </script>
 </body>
-
 </html>
