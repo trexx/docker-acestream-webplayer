@@ -1,64 +1,159 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Boring AceStream Player</title>
+  <script src="cast_sender.js?loadCastFramework=1"></script>
   <script src="mpegts.js"></script>
   <link rel="icon" href="data:,">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 1.5rem; }
+    h1 { font-size: 1.2rem; margin-bottom: 1.2rem; letter-spacing: 0.04em; }
+    .row { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; align-items: center; }
+    label { font-size: 0.8rem; color: #aaa; width: 5rem; flex-shrink: 0; }
+    input { flex: 1; background: #222; border: 1px solid #444; color: #eee; padding: 0.4rem 0.6rem; border-radius: 4px; font-size: 0.9rem; }
+    .buttons { display: flex; gap: 0.5rem; margin-bottom: 1rem; align-items: center; flex-wrap: wrap; }
+    button { background: #333; border: 1px solid #555; color: #eee; padding: 0.4rem 0.9rem; border-radius: 4px; cursor: pointer; font-size: 0.9rem; }
+    button:hover { background: #444; }
+    button.primary { background: #1a6fd4; border-color: #2280f0; }
+    button.primary:hover { background: #2280f0; }
+    button.danger { background: #7a1a1a; border-color: #a02020; }
+    button.danger:hover { background: #a02020; }
+    google-cast-launcher { --connected-color: #4caf50; --disconnected-color: #aaa; width: 32px; height: 32px; cursor: pointer; }
+    video { width: 100%; max-width: 900px; background: #000; border-radius: 4px; display: block; margin-bottom: 1rem; }
+    pre { background: #1a1a1a; border: 1px solid #333; border-radius: 4px; padding: 0.75rem; font-size: 0.8rem; color: #9cf; white-space: pre-wrap; word-break: break-all; min-height: 2.5rem; max-height: 8rem; overflow-y: auto; }
+    .label { font-size: 0.75rem; color: #888; margin-bottom: 0.25rem; }
+  </style>
 </head>
-
 <body>
-  <label for="acestreamId">AceStream ID</label>
-  <input type="text" id="acestreamId">
-  <br><br>
+  <h1>Boring AceStream Player</h1>
 
-  <video id="videoElement" controls width="800"></video>
+  <div class="row">
+    <label for="acestreamId">AceStream ID</label>
+    <input id="acestreamId" type="text" placeholder="40-char content ID">
+  </div>
+
+  <div class="buttons">
+    <button class="primary" id="btnPreview">Load preview</button>
+    <button id="btnCast">Cast</button>
+    <button class="danger" id="btnStop">Stop cast</button>
+    <google-cast-launcher id="castLauncher"></google-cast-launcher>
+  </div>
+
+  <video id="video" controls></video>
+
+  <div class="label">Status</div>
+  <pre id="status">Ready.</pre>
 
   <script>
-    const acestreamInput = document.getElementById('acestreamId');
-    const videoElement = document.getElementById('videoElement');
-    
-    let streamUrl = '';
+    const video = document.getElementById('video');
+    const statusEl = document.getElementById('status');
+    const idEl = document.getElementById('acestreamId');
+
+    idEl.value = localStorage.getItem('acestreamId') || '';
+
+    function log(msg) {
+      statusEl.textContent = msg;
+      console.log('[cast.html]', msg);
+    }
+
+    function getId() {
+      const id = idEl.value.trim();
+      if (!id) return null;
+      localStorage.setItem('acestreamId', id);
+      return id;
+    }
+
+    function tsUrl(id)  { return `http:///ace/getstream?id=${id}`; }
+    function hlsUrl(id) { return `http://${location.hostname}/ace/manifest.m3u8?id=${id}`; }
+
+    // Cast SDK init
+    window['__onGCastApiAvailable'] = function(isAvailable) {
+      if (!isAvailable) {
+        log('Cast SDK unavailable. Use Chrome/Edge on localhost.');
+        return;
+      }
+      cast.framework.CastContext.getInstance().setOptions({
+        receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+        autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
+      });
+      log('Cast SDK ready. Click the cast icon to connect a device.');
+    };
+
+    // mpegts.js preview
     let player = null;
 
-    acestreamInput.value = localStorage.getItem('acestreamId') || '';
+    function destroyPlayer() {
+      if (!player) return;
+      player.pause();
+      player.unload();
+      player.detachMediaElement();
+      player.destroy();
+      player = null;
+    }
 
-    acestreamInput.addEventListener('keypress', function(event) {
-      event.preventDefault();
+    document.getElementById('btnPreview').addEventListener('click', () => {
+      const id = getId();
+      if (!id) { log('Enter an AceStream ID first.'); return; }
+      const url = tsUrl(id);
 
-      if (event.key === 'Enter' && acestreamId) {
-        const acestreamId = acestreamInput.value.trim();
-        const hostname = window.location.hostname;
+      destroyPlayer();
 
-        localStorage.setItem('acestreamId', acestreamId);
-        streamUrl = `http://${hostname}/ace/getstream?id=${acestreamId}`;
-        
-        if (player) {
-          player.destroy();
-          player = null;
-        }
-
-        if (streamUrl && mpegts.getFeatureList().mseLivePlayback) {
-          player = mpegts.createPlayer({
-            type: 'mse',
-            isLive: true,
-            url: streamUrl
-          }, {
-            enableWorker: true,
-            enableStashBuffer: false,
-            isLive: true
-          });
-          
-          player.attachMediaElement(videoElement);    
-          player.load();
-          player.play();
-        }
+      if (!mpegts.getFeatureList().mseLivePlayback) {
+        log('MSE live playback not supported in this browser.');
+        return;
       }
+
+      player = mpegts.createPlayer(
+        { type: 'mpegts', isLive: true, url },
+        {
+          enableWorker: true,           // demux/remux off the main thread (matches index.html)
+          enableWorkerForMSE: true,     // also use worker for MSE updates (default false, main thread)
+          enableStashBuffer: false,     // ~384KB input-side cushion against fetch-side jitter
+          autoCleanupSourceBuffer: true // bound memory over long matches
+        }
+      );
+
+      player.on(mpegts.Events.ERROR, (type, detail) => {
+        log('mpegts.js error: ' + type + ' / ' + JSON.stringify(detail));
+      });
+
+      player.attachMediaElement(video);
+      player.load();
+      player.play().catch(e => log('play() rejected: ' + e.message));
+      log('Loading preview: ' + url);
     });
 
+    // Cast
+    document.getElementById('btnCast').addEventListener('click', () => {
+      const id = getId();
+      if (!id) { log('Enter an AceStream ID first.'); return; }
+      const url = hlsUrl(id);
+
+      const session = cast.framework.CastContext.getInstance().getCurrentSession();
+      if (!session) {
+        log('No cast session — click the cast icon and pick a device first.');
+        return;
+      }
+
+      const mediaInfo = new chrome.cast.media.MediaInfo(url, 'application/x-mpegurl');
+      mediaInfo.hlsSegmentFormat = chrome.cast.media.HlsSegmentFormat.TS;
+      mediaInfo.streamType = chrome.cast.media.StreamType.LIVE;
+
+      session.loadMedia(new chrome.cast.media.LoadRequest(mediaInfo))
+        .then(() => log('Casting: ' + url))
+        .catch(err => log('Cast load failed: ' + JSON.stringify(err)));
+    });
+
+    // Stop
+    document.getElementById('btnStop').addEventListener('click', () => {
+      const session = cast.framework.CastContext.getInstance().getCurrentSession();
+      if (!session) { log('No active cast session.'); return; }
+      session.endSession(true);
+      log('Cast session ended.');
+    });
   </script>
 </body>
-
 </html>
