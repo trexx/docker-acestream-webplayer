@@ -25,10 +25,22 @@
     video { width: 100%; max-width: 900px; background: #000; border-radius: 4px; display: block; margin-bottom: 1rem; }
     pre { background: #1a1a1a; border: 1px solid #333; border-radius: 4px; padding: 0.75rem; font-size: 0.8rem; color: #9cf; white-space: pre-wrap; word-break: break-all; min-height: 2.5rem; max-height: 8rem; overflow-y: auto; }
     .label { font-size: 0.75rem; color: #888; margin-bottom: 0.25rem; }
+    details.settings { margin-bottom: 0.75rem; }
+    details.settings summary { cursor: pointer; font-size: 0.8rem; color: #aaa; padding: 0.25rem 0; user-select: none; }
+    details.settings summary:hover { color: #ccc; }
+    details.settings .row { margin-top: 0.5rem; margin-bottom: 0; }
   </style>
 </head>
 <body>
   <h1>Boring AceStream Player</h1>
+
+  <details class="settings">
+    <summary>Settings</summary>
+    <div class="row">
+      <label for="engineHost">Engine host</label>
+      <input id="engineHost" type="text" placeholder="acestream.apps.pixelman.me">
+    </div>
+  </details>
 
   <div class="row">
     <label for="acestreamId">AceStream ID</label>
@@ -51,8 +63,11 @@
     const video = document.getElementById('video');
     const statusEl = document.getElementById('status');
     const idEl = document.getElementById('acestreamId');
+    const hostEl = document.getElementById('engineHost');
+    const DEFAULT_HOST = 'acestream.apps.pixelman.me';
 
     idEl.value = localStorage.getItem('acestreamId') || '';
+    hostEl.value = localStorage.getItem('engineHost') || '';
 
     function log(msg) {
       statusEl.textContent = msg;
@@ -66,8 +81,17 @@
       return id;
     }
 
-    function tsUrl(id)  { return `http:///ace/getstream?id=${id}`; }
-    function hlsUrl(id) { return `http://${location.hostname}/ace/manifest.m3u8?id=${id}`; }
+    function getHost() {
+      const host = hostEl.value.trim();
+      if (host) {
+        localStorage.setItem('engineHost', host);
+        return host;
+      }
+      return DEFAULT_HOST;
+    }
+
+    function tsUrl(id)  { return `http://${getHost()}/getstream?id=${id}`; }
+    function hlsUrl(id) { return `http://${getHost()}/ace/manifest.m3u8?id=${id}`; }
 
     // Cast SDK init
     window['__onGCastApiAvailable'] = function(isAvailable) {
