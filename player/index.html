@@ -90,7 +90,7 @@
       return DEFAULT_HOST;
     }
 
-    function tsUrl(id)  { return `http://${getHost()}/getstream?id=${id}`; }
+    function tsUrl(id)  { return `https://${getHost()}/getstream?id=${id}`; }
     function hlsUrl(id) { return `https://${getHost()}/ace/manifest.m3u8?id=${id}`; }
 
     // Cast SDK init
