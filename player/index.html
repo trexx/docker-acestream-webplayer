@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Boring AceStream Player</title>
-  <script src="cast_sender.js?loadCastFramework=1"></script>
   <script src="mpegts.js"></script>
   <link rel="icon" href="data:,">
   <style>
@@ -21,7 +20,7 @@
     button.primary:hover { background: #2280f0; }
     button.danger { background: #7a1a1a; border-color: #a02020; }
     button.danger:hover { background: #a02020; }
-    google-cast-launcher { --connected-color: #4caf50; --disconnected-color: #aaa; width: 32px; height: 32px; cursor: pointer; }
+    #castDevice { background: #222; border: 1px solid #444; color: #eee; padding: 0.4rem 0.6rem; border-radius: 4px; font-size: 0.9rem; }
     video { width: 100%; max-width: 900px; background: #000; border-radius: 4px; display: block; margin-bottom: 1rem; }
     pre { background: #1a1a1a; border: 1px solid #333; border-radius: 4px; padding: 0.75rem; font-size: 0.8rem; color: #9cf; white-space: pre-wrap; word-break: break-all; min-height: 2.5rem; max-height: 8rem; overflow-y: auto; }
     .label { font-size: 0.75rem; color: #888; margin-bottom: 0.25rem; }
@@ -51,7 +50,7 @@
     <button class="primary" id="btnPreview">Stream</button>
     <button id="btnCast">Cast</button>
     <button class="danger" id="btnStop">Stop cast</button>
-    <google-cast-launcher id="castLauncher"></google-cast-launcher>
+    <select id="castDevice" aria-label="Cast device"></select>
   </div>
 
   <video id="video" controls disableRemotePlayback></video>
@@ -64,7 +63,15 @@
     const statusEl = document.getElementById('status');
     const idEl = document.getElementById('acestreamId');
     const hostEl = document.getElementById('engineHost');
+    const deviceEl = document.getElementById('castDevice');
     const DEFAULT_HOST = 'acestream.apps.pixelman.me';
+
+    // Casting goes through Home Assistant: the page POSTs to a webhook, an HA automation
+    // calls media_player.play_media on the chosen Chromecast. Works the same on desktop and
+    // mobile (the Web Sender SDK was dropped because it doesn't work on mobile browsers).
+    const HA_CAST_WEBHOOK = 'https://hass.apps.pixelman.me/api/webhook/0615c2465c362a0efa0c23d7e574847e';
+    const HA_STOP_WEBHOOK = 'https://hass.apps.pixelman.me/api/webhook/03cde423f9aade35142368190c9925b8';
+    const CAST_DEVICES = ['basement-tv', 'living-room-tv']; // must match the HA automation's devices map
 
     idEl.value = localStorage.getItem('acestreamId') || '';
     hostEl.value = localStorage.getItem('engineHost') || '';
@@ -90,21 +97,21 @@
       return DEFAULT_HOST;
     }
 
-    function tsUrl(id)  { return `https://${getHost()}/ace/getstream?id=${id}`; }
-    function hlsUrl(id) { return `https://${getHost()}/ace/manifest.m3u8?id=${id}`; }
+    function tsUrl(id) { return `https://${getHost()}/ace/getstream?id=${id}`; }
 
-    // Cast SDK init
-    window['__onGCastApiAvailable'] = function(isAvailable) {
-      if (!isAvailable) {
-        log('Cast SDK unavailable. Use Chrome/Edge on localhost.');
-        return;
+    function populateDevices() {
+      for (const name of CAST_DEVICES) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        deviceEl.appendChild(opt);
       }
-      cast.framework.CastContext.getInstance().setOptions({
-        receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
-        autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
-      });
-      log('Cast SDK ready. Click the cast icon to connect a device.');
-    };
+      const saved = localStorage.getItem('castDevice');
+      if (saved && CAST_DEVICES.includes(saved)) deviceEl.value = saved;
+      deviceEl.addEventListener('change', () => localStorage.setItem('castDevice', deviceEl.value));
+    }
+
+    populateDevices();
 
     // mpegts.js preview
     let player = null;
@@ -154,29 +161,29 @@
     document.getElementById('btnCast').addEventListener('click', () => {
       const id = getId();
       if (!id) { log('Enter an AceStream ID first.'); return; }
-      const url = hlsUrl(id);
-
-      const session = cast.framework.CastContext.getInstance().getCurrentSession();
-      if (!session) {
-        log('No cast session — click the cast icon and pick a device first.');
-        return;
-      }
-
-      const mediaInfo = new chrome.cast.media.MediaInfo(url, 'application/x-mpegurl');
-      mediaInfo.hlsSegmentFormat = chrome.cast.media.HlsSegmentFormat.TS;
-      mediaInfo.streamType = chrome.cast.media.StreamType.LIVE;
-
-      session.loadMedia(new chrome.cast.media.LoadRequest(mediaInfo))
-        .then(() => log('Casting: ' + url))
-        .catch(err => log('Cast load failed: ' + JSON.stringify(err)));
+      const device = deviceEl.value;
+      if (!device) { log('Pick a cast device first.'); return; }
+      log(`Casting to ${device} via HA…`);
+      fetch(HA_CAST_WEBHOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, host: getHost(), device }),
+      })
+        .then(r => log(r.ok ? `Cast request accepted (${device}).` : `Cast request failed: HTTP ${r.status}.`))
+        .catch(e => log('Cast request error: ' + e.message));
     });
 
     // Stop
     document.getElementById('btnStop').addEventListener('click', () => {
-      const session = cast.framework.CastContext.getInstance().getCurrentSession();
-      if (!session) { log('No active cast session.'); return; }
-      session.endSession(true);
-      log('Cast session ended.');
+      const device = deviceEl.value;
+      if (!device) { log('Pick a cast device first.'); return; }
+      fetch(HA_STOP_WEBHOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device }),
+      })
+        .then(r => log(r.ok ? `Stop request accepted (${device}).` : `Stop request failed: HTTP ${r.status}.`))
+        .catch(e => log('Stop request error: ' + e.message));
     });
   </script>
 </body>
