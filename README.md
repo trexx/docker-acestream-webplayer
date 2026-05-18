@@ -1,7 +1,7 @@
 # docker-acestream-webplayer
 A bland and boring static website with 2 basic features:
 * Playing Acestreams in browser using mpegts.js
-* Casting Acestreams to Android TV's and Chromecasts using Cast Sender SDK.
+* Casting Acestreams to Android TV's and Chromecasts using Home Assistant automation webhooks.
 
 With some basic UI elements to make the above a little easier.
 
