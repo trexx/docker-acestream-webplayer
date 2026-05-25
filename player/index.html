@@ -142,8 +142,7 @@
         {
           enableWorker: true,           // demux/remux off the main thread (matches index.html)
           enableWorkerForMSE: true,     // also use worker for MSE updates (default false, main thread)
-          enableStashBuffer: false,     // ~384KB input-side cushion against fetch-side jitter
-          autoCleanupSourceBuffer: true // bound memory over long matches
+          enableStashBuffer: false      // ~384KB input-side cushion against fetch-side jitter
         }
       );
 
