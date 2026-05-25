@@ -97,7 +97,7 @@
       return DEFAULT_HOST;
     }
 
-    function tsUrl(id) { return `https://${getHost()}/ace/getstream?id=${id}`; }
+    function tsUrl(id) { return `http://${getHost()}/ace/getstream?id=${id}`; }
 
     function populateDevices() {
       for (const name of CAST_DEVICES) {
