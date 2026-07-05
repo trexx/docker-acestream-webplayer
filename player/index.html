@@ -28,6 +28,12 @@
     details.settings summary { cursor: pointer; font-size: 0.8rem; color: #aaa; padding: 0.25rem 0; user-select: none; }
     details.settings summary:hover { color: #ccc; }
     details.settings .row { margin-top: 0.5rem; margin-bottom: 0; }
+    input[type="checkbox"] { flex: 0 0 auto; width: 1rem; height: 1rem; accent-color: #1a6fd4; }
+    body.audio-mode video { display: none; }
+    #audioPanel { display: flex; gap: 0.75rem; align-items: center; max-width: 900px; background: #1a1a1a; border: 1px solid #333; border-radius: 4px; padding: 0.9rem 1rem; margin-bottom: 1rem; }
+    #audioPanel[hidden] { display: none; }
+    .np-icon { color: #2280f0; font-size: 1.4rem; }
+    .np-title { flex: 1; font-size: 0.9rem; color: #ccc; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -39,6 +45,14 @@
       <label for="engineHost">Engine host</label>
       <input id="engineHost" type="text" placeholder="acestream.apps.pixelman.me">
     </div>
+    <div class="row">
+      <label for="transcoderHost">Audio host</label>
+      <input id="transcoderHost" type="text" placeholder="acestream-audio transcoder host (for Listen)">
+    </div>
+    <div class="row">
+      <label for="keepScreenOn">Keep screen on</label>
+      <input id="keepScreenOn" type="checkbox">
+    </div>
   </details>
 
   <div class="row">
@@ -48,22 +62,27 @@
 
   <div class="buttons">
     <button class="primary" id="btnPreview">Stream</button>
+    <button id="btnListen">Listen</button>
     <button id="btnCast">Cast</button>
     <button class="danger" id="btnStop">Stop cast</button>
     <select id="castDevice" aria-label="Cast device"></select>
   </div>
 
-  <video id="video" controls disableRemotePlayback></video>
+  <video id="video" controls playsinline disableRemotePlayback></video>
+
+  <div id="audioPanel" hidden>
+    <span class="np-icon">&#9834;</span>
+    <span id="npTitle" class="np-title">&mdash;</span>
+    <button class="primary" id="btnAudioToggle">Pause</button>
+    <button id="btnExitAudio">Show video</button>
+  </div>
 
   <div class="label">Status</div>
   <pre id="status">Ready.</pre>
 
   <script>
-    const video = document.getElementById('video');
-    const statusEl = document.getElementById('status');
-    const idEl = document.getElementById('acestreamId');
-    const hostEl = document.getElementById('engineHost');
-    const deviceEl = document.getElementById('castDevice');
+    // ---- Config ------------------------------------------------------------
+
     const DEFAULT_HOST = 'acestream.apps.pixelman.me';
 
     // Casting goes through Home Assistant: the page POSTs to a webhook, an HA automation
@@ -71,119 +90,269 @@
     // mobile (the Web Sender SDK was dropped because it doesn't work on mobile browsers).
     const HA_CAST_WEBHOOK = 'https://hass.apps.pixelman.me/api/webhook/0615c2465c362a0efa0c23d7e574847e';
     const HA_STOP_WEBHOOK = 'https://hass.apps.pixelman.me/api/webhook/03cde423f9aade35142368190c9925b8';
-    const CAST_DEVICES = ['basement-tv', 'living-room-tv']; // must match the HA automation's devices map
+    const CAST_DEVICES = ['basement-tv', 'living-room-tv', 'amp']; // must match the HA automation's devices map
 
-    idEl.value = localStorage.getItem('acestreamId') || '';
-    hostEl.value = localStorage.getItem('engineHost') || '';
+    // ---- DOM + status ------------------------------------------------------
+
+    const video = document.getElementById('video');
+    const statusEl = document.getElementById('status');
+    const idEl = document.getElementById('acestreamId');
+    const hostEl = document.getElementById('engineHost');
+    const transEl = document.getElementById('transcoderHost');
+    const wakeEl = document.getElementById('keepScreenOn');
+    const deviceEl = document.getElementById('castDevice');
+    const audioPanel = document.getElementById('audioPanel');
+    const npTitle = document.getElementById('npTitle');
+    const btnAudioToggle = document.getElementById('btnAudioToggle');
 
     function log(msg) {
       statusEl.textContent = msg;
       console.log('[cast.html]', msg);
     }
 
-    function getId() {
-      const id = idEl.value.trim();
-      if (!id) return null;
-      localStorage.setItem('acestreamId', id);
-      return id;
+    // ---- Settings (all localStorage access lives here) ----------------------
+    // Text inputs persist when their value is used (a button click), not per
+    // keystroke. Clearing the Audio host does persist — that's how Listen support
+    // is turned off — while a cleared AceStream ID or engine host keeps the
+    // previously saved value on reload.
+
+    const settings = {
+      load() {
+        idEl.value = localStorage.getItem('acestreamId') || '';
+        hostEl.value = localStorage.getItem('engineHost') || '';
+        transEl.value = localStorage.getItem('transcoderHost') || '';
+        wakeEl.checked = localStorage.getItem('keepScreenOn') === 'true';
+        const device = localStorage.getItem('castDevice');
+        if (device && CAST_DEVICES.includes(device)) deviceEl.value = device;
+      },
+      id() {
+        const id = idEl.value.trim();
+        if (!id) return null;
+        localStorage.setItem('acestreamId', id);
+        return id;
+      },
+      engineHost() {
+        const host = hostEl.value.trim();
+        if (host) {
+          localStorage.setItem('engineHost', host);
+          return host;
+        }
+        return DEFAULT_HOST;
+      },
+      // acestream-audio transcoder (github.com/trexx/docker-acestream-audio): strips video
+      // server-side. Required for Listen; also handed to HA for audio-only cast targets.
+      transcoderHost() {
+        const t = transEl.value.trim();
+        localStorage.setItem('transcoderHost', t);
+        return t;
+      },
+      saveKeepScreenOn() { localStorage.setItem('keepScreenOn', wakeEl.checked); },
+      saveCastDevice() { localStorage.setItem('castDevice', deviceEl.value); },
+    };
+
+    // ---- Stream URLs ---------------------------------------------------------
+
+    // The engine treats getstream requests without distinct player ids (pid) as the same
+    // session and stops serving the old one when a new request arrives, so every client
+    // gets its own. Per-playback (not per-device) so two tabs don't collide. No
+    // crypto.randomUUID: the page runs over plain HTTP where it's unavailable.
+    function newPid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
+
+    function tsUrl(id) { return `http://${settings.engineHost()}/ace/getstream?id=${id}&pid=${newPid()}`; }
+
+    function audioUrl(id) { return `http://${settings.transcoderHost()}/audio?id=${id}&host=${settings.engineHost()}`; }
+
+    // ---- Playback ------------------------------------------------------------
+    // Both modes share the <video> element: 'mse' plays the live muxed TS through
+    // mpegts.js, 'direct' points src straight at the transcoder's audio stream.
+
+    const playback = {
+      player: null, // mpegts.js instance (mse mode only)
+
+      startMse(url) {
+        if (!mpegts.getFeatureList().mseLivePlayback) {
+          log('MSE live playback not supported in this browser.');
+          return false;
+        }
+        this.player = mpegts.createPlayer(
+          { type: 'mpegts', isLive: true, url },
+          {
+            enableWorker: true,           // demux/remux off the main thread
+            enableWorkerForMSE: true,     // also use worker for MSE updates (default false, main thread)
+            enableStashBuffer: false      // ~384KB input-side cushion against fetch-side jitter
+          }
+        );
+        this.player.on(mpegts.Events.ERROR, (type, detail) => {
+          log('mpegts.js error: ' + type + ' / ' + JSON.stringify(detail));
+        });
+        this.player.attachMediaElement(video);
+        this.player.load();
+        this.player.play().catch(e => log('play() rejected: ' + e.message));
+        return true;
+      },
+
+      startDirect(url) {
+        video.src = url;
+        video.play().catch(e => log('play() rejected: ' + e.message));
+      },
+
+      stop() {
+        if (this.player) {
+          this.player.pause();
+          this.player.unload();
+          this.player.detachMediaElement();
+          this.player.destroy();
+          this.player = null;
+        } else if (video.src) {
+          // direct-src teardown — mpegts handles its own element state above
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        }
+      },
+    };
+
+    // ---- Audio mode / Media Session -------------------------------------------
+    // Listen hides the video element and shows the now-playing panel. The active
+    // Media Session gives lock-screen/car controls and exempts the page from
+    // background-tab throttling, keeping audio alive while the phone is locked.
+
+    function enterAudioMode(label) {
+      document.body.classList.add('audio-mode');
+      audioPanel.hidden = false;
+      npTitle.textContent = label;
+      if (!('mediaSession' in navigator)) return;
+      navigator.mediaSession.metadata = new MediaMetadata({ title: label, artist: 'AceStream' });
+      navigator.mediaSession.setActionHandler('play', () => video.play());
+      navigator.mediaSession.setActionHandler('pause', () => video.pause());
+      navigator.mediaSession.setActionHandler('stop', () => {
+        playback.stop();
+        exitAudioMode();
+        log('Stopped.');
+      });
     }
 
-    function getHost() {
-      const host = hostEl.value.trim();
-      if (host) {
-        localStorage.setItem('engineHost', host);
-        return host;
+    function exitAudioMode() {
+      document.body.classList.remove('audio-mode');
+      audioPanel.hidden = true;
+      if ('mediaSession' in navigator) navigator.mediaSession.metadata = null;
+    }
+
+    // ---- Wake lock -------------------------------------------------------------
+    // Opt-in, for a mounted phone that should keep its display on. It cannot keep a
+    // locked page awake (the OS releases it on lock) — Media Session covers that case.
+
+    let wakeLock = null;
+    async function applyWakeLock() {
+      const want = wakeEl.checked && document.visibilityState === 'visible';
+      if (want && !wakeLock && 'wakeLock' in navigator) {
+        try {
+          wakeLock = await navigator.wakeLock.request('screen');
+          wakeLock.addEventListener('release', () => { wakeLock = null; });
+        } catch (e) {
+          log('Wake lock unavailable: ' + e.message);
+        }
+      } else if (!want && wakeLock) {
+        wakeLock.release();
+        wakeLock = null;
       }
-      return DEFAULT_HOST;
     }
 
-    function tsUrl(id) { return `http://${getHost()}/ace/getstream?id=${id}`; }
+    // ---- HA casting --------------------------------------------------------------
 
-    function populateDevices() {
-      for (const name of CAST_DEVICES) {
-        const opt = document.createElement('option');
-        opt.value = name;
-        opt.textContent = name;
-        deviceEl.appendChild(opt);
-      }
-      const saved = localStorage.getItem('castDevice');
-      if (saved && CAST_DEVICES.includes(saved)) deviceEl.value = saved;
-      deviceEl.addEventListener('change', () => localStorage.setItem('castDevice', deviceEl.value));
+    function haRequest(kind, webhook, body) {
+      fetch(webhook, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+        .then(r => log(r.ok ? `${kind} request accepted (${body.device}).` : `${kind} request failed: HTTP ${r.status}.`))
+        .catch(e => log(`${kind} request error: ` + e.message));
     }
 
-    populateDevices();
-
-    // mpegts.js preview
-    let player = null;
-
-    function destroyPlayer() {
-      if (!player) return;
-      player.pause();
-      player.unload();
-      player.detachMediaElement();
-      player.destroy();
-      player = null;
+    function cast(id, device) {
+      log(`Casting to ${device} via HA…`);
+      haRequest('Cast', HA_CAST_WEBHOOK, {
+        id,
+        host: settings.engineHost(),
+        device,
+        // pid: engine player id for the automation to append (&pid=) to the getstream URL;
+        // stable per device, so re-casting to the same TV replaces its session.
+        pid: device,
+        // transcoder lets the HA automation cast audio-only targets (e.g. Chromecast Audio)
+        // via http://<transcoder>/audio?id=…&host=… (AAC stream-copy) instead of the muxed TS.
+        transcoder: settings.transcoderHost() || undefined,
+      });
     }
+
+    // ---- Wiring + init ---------------------------------------------------------
+
+    for (const name of CAST_DEVICES) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      deviceEl.appendChild(opt);
+    }
+    settings.load(); // after the <select> has its options, so the saved device applies
 
     document.getElementById('btnPreview').addEventListener('click', () => {
-      const id = getId();
+      const id = settings.id();
       if (!id) { log('Enter an AceStream ID first.'); return; }
+      playback.stop();
+      exitAudioMode();
       const url = tsUrl(id);
-
-      destroyPlayer();
-
-      if (!mpegts.getFeatureList().mseLivePlayback) {
-        log('MSE live playback not supported in this browser.');
-        return;
-      }
-
-      player = mpegts.createPlayer(
-        { type: 'mpegts', isLive: true, url },
-        {
-          enableWorker: true,           // demux/remux off the main thread (matches index.html)
-          enableWorkerForMSE: true,     // also use worker for MSE updates (default false, main thread)
-          enableStashBuffer: false      // ~384KB input-side cushion against fetch-side jitter
-        }
-      );
-
-      player.on(mpegts.Events.ERROR, (type, detail) => {
-        log('mpegts.js error: ' + type + ' / ' + JSON.stringify(detail));
-      });
-
-      player.attachMediaElement(video);
-      player.load();
-      player.play().catch(e => log('play() rejected: ' + e.message));
-      log('Loading preview: ' + url);
+      if (playback.startMse(url)) log('Loading preview: ' + url);
     });
 
-    // Cast
-    document.getElementById('btnCast').addEventListener('click', () => {
-      const id = getId();
+    document.getElementById('btnListen').addEventListener('click', () => {
+      const id = settings.id();
       if (!id) { log('Enter an AceStream ID first.'); return; }
-      const device = deviceEl.value;
-      if (!device) { log('Pick a cast device first.'); return; }
-      log(`Casting to ${device} via HA…`);
-      fetch(HA_CAST_WEBHOOK, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, host: getHost(), device }),
-      })
-        .then(r => log(r.ok ? `Cast request accepted (${device}).` : `Cast request failed: HTTP ${r.status}.`))
-        .catch(e => log('Cast request error: ' + e.message));
+      if (!settings.transcoderHost()) { log('Set the Audio host in Settings first (acestream-audio transcoder).'); return; }
+      playback.stop();
+      // Server-side audio-only: plain <media> src, no MSE — a fraction of the data.
+      const url = audioUrl(id);
+      playback.startDirect(url);
+      enterAudioMode(id);
+      log('Listening (audio only): ' + url);
     });
 
-    // Stop
-    document.getElementById('btnStop').addEventListener('click', () => {
-      const device = deviceEl.value;
-      if (!device) { log('Pick a cast device first.'); return; }
-      fetch(HA_STOP_WEBHOOK, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device }),
-      })
-        .then(r => log(r.ok ? `Stop request accepted (${device}).` : `Stop request failed: HTTP ${r.status}.`))
-        .catch(e => log('Stop request error: ' + e.message));
+    document.getElementById('btnCast').addEventListener('click', () => {
+      const id = settings.id();
+      if (!id) { log('Enter an AceStream ID first.'); return; }
+      if (!deviceEl.value) { log('Pick a cast device first.'); return; }
+      cast(id, deviceEl.value);
     });
+
+    document.getElementById('btnStop').addEventListener('click', () => {
+      if (!deviceEl.value) { log('Pick a cast device first.'); return; }
+      haRequest('Stop', HA_STOP_WEBHOOK, { device: deviceEl.value });
+    });
+
+    btnAudioToggle.addEventListener('click', () => video.paused ? video.play() : video.pause());
+    document.getElementById('btnExitAudio').addEventListener('click', exitAudioMode);
+
+    video.addEventListener('play', () => {
+      btnAudioToggle.textContent = 'Pause';
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+    });
+    video.addEventListener('pause', () => {
+      btnAudioToggle.textContent = 'Play';
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    });
+    video.addEventListener('error', () => {
+      if (video.error) log('Media error: ' + (video.error.message || 'code ' + video.error.code));
+    });
+
+    wakeEl.addEventListener('change', () => {
+      settings.saveKeepScreenOn();
+      if (wakeEl.checked && !('wakeLock' in navigator)) log('Screen wake lock not supported here (needs HTTPS).');
+      applyWakeLock();
+    });
+    document.addEventListener('visibilitychange', applyWakeLock);
+
+    deviceEl.addEventListener('change', () => settings.saveCastDevice());
+
+    applyWakeLock();
   </script>
 </body>
 </html>
