@@ -118,7 +118,6 @@ const CID = 'ab'.repeat(20);
 await evl(`
   idEl.value = ${JSON.stringify(CID)};
   hostEl.value = '127.0.0.1:${PORT}';
-  transEl.value = '127.0.0.1:${PORT}';
   window.__haCalls = [];
   const realFetch = window.fetch.bind(window);
   window.fetch = (url, opts) => {
@@ -165,12 +164,12 @@ await evl(`document.getElementById('btnCast').click(); 'ok'`);
 await sleep(300);
 const castCall = await evl(`window.__haCalls[0] ?? null`);
 check('Cast: webhook called once', !!castCall && await evl(`window.__haCalls.length === 1`));
-check('Cast: payload id/host/device/pid/transcoder', !!castCall
+check('Cast: payload id/host/device/pid, transcoder = engine host', !!castCall
   && castCall.body.id === CID
   && castCall.body.host === `127.0.0.1:${PORT}`
   && castCall.body.device === 'basement-tv'
   && castCall.body.pid === 'basement-tv'
-  && castCall.body.transcoder === `127.0.0.1:${PORT}`,
+  && castCall.body.transcoder === castCall.body.host,
   JSON.stringify(castCall?.body));
 check('Cast: accepted status shown', await evl(`statusEl.textContent.includes('Cast request accepted (basement-tv)')`));
 
@@ -181,10 +180,9 @@ const stopCall = await evl(`window.__haCalls[1] ?? null`);
 check('Stop: payload is {device}', !!stopCall && stopCall.body.device === 'basement-tv' && Object.keys(stopCall.body).length === 1, JSON.stringify(stopCall?.body));
 
 // --- Persistence ---
-check('Persist: id/host/transcoder saved', await evl(`
+check('Persist: id/host saved', await evl(`
   localStorage.getItem('acestreamId') === ${JSON.stringify(CID)} &&
-  localStorage.getItem('engineHost') === '127.0.0.1:${PORT}' &&
-  localStorage.getItem('transcoderHost') === '127.0.0.1:${PORT}'
+  localStorage.getItem('engineHost') === '127.0.0.1:${PORT}'
 `));
 await evl(`deviceEl.value = 'living-room-tv'; deviceEl.dispatchEvent(new Event('change')); 'ok'`);
 check('Persist: cast device saved on change', await evl(`localStorage.getItem('castDevice') === 'living-room-tv'`));
@@ -194,7 +192,7 @@ await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/index.html` });
 await sleep(1200);
 check('Reload: inputs + device restored', await evl(`
   idEl.value === ${JSON.stringify(CID)} && hostEl.value === '127.0.0.1:${PORT}' &&
-  transEl.value === '127.0.0.1:${PORT}' && deviceEl.value === 'living-room-tv'
+  deviceEl.value === 'living-room-tv'
 `));
 
 const realErrors = pageErrors.filter(t => !/mpegts|MediaError|demux/i.test(t));

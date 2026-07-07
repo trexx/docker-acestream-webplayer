@@ -46,10 +46,6 @@
       <input id="engineHost" type="text" placeholder="acestream.apps.pixelman.me">
     </div>
     <div class="row">
-      <label for="transcoderHost">Audio host</label>
-      <input id="transcoderHost" type="text" placeholder="acestream-audio transcoder host (for Listen)">
-    </div>
-    <div class="row">
       <label for="keepScreenOn">Keep screen on</label>
       <input id="keepScreenOn" type="checkbox">
     </div>
@@ -98,7 +94,6 @@
     const statusEl = document.getElementById('status');
     const idEl = document.getElementById('acestreamId');
     const hostEl = document.getElementById('engineHost');
-    const transEl = document.getElementById('transcoderHost');
     const wakeEl = document.getElementById('keepScreenOn');
     const deviceEl = document.getElementById('castDevice');
     const audioPanel = document.getElementById('audioPanel');
@@ -112,15 +107,13 @@
 
     // ---- Settings (all localStorage access lives here) ----------------------
     // Text inputs persist when their value is used (a button click), not per
-    // keystroke. Clearing the Audio host does persist — that's how Listen support
-    // is turned off — while a cleared AceStream ID or engine host keeps the
-    // previously saved value on reload.
+    // keystroke. A cleared AceStream ID or engine host keeps the previously
+    // saved value on reload.
 
     const settings = {
       load() {
         idEl.value = localStorage.getItem('acestreamId') || '';
         hostEl.value = localStorage.getItem('engineHost') || '';
-        transEl.value = localStorage.getItem('transcoderHost') || '';
         wakeEl.checked = localStorage.getItem('keepScreenOn') === 'true';
         const device = localStorage.getItem('castDevice');
         if (device && CAST_DEVICES.includes(device)) deviceEl.value = device;
@@ -139,13 +132,6 @@
         }
         return DEFAULT_HOST;
       },
-      // acestream-audio transcoder (github.com/trexx/docker-acestream-audio): strips video
-      // server-side. Required for Listen; also handed to HA for audio-only cast targets.
-      transcoderHost() {
-        const t = transEl.value.trim();
-        localStorage.setItem('transcoderHost', t);
-        return t;
-      },
       saveKeepScreenOn() { localStorage.setItem('keepScreenOn', wakeEl.checked); },
       saveCastDevice() { localStorage.setItem('castDevice', deviceEl.value); },
     };
@@ -160,7 +146,10 @@
 
     function tsUrl(id) { return `http://${settings.engineHost()}/ace/getstream?id=${id}&pid=${newPid()}`; }
 
-    function audioUrl(id) { return `http://${settings.transcoderHost()}/audio?id=${id}&host=${settings.engineHost()}`; }
+    // acestream-audio transcoder (github.com/trexx/docker-acestream-audio): strips video
+    // server-side for Listen and audio-only cast targets. Path-routed on the engine
+    // host (the ingress sends /audio to the transcoder), so it needs no own setting.
+    function audioUrl(id) { const host = settings.engineHost(); return `http://${host}/audio?id=${id}&host=${host}`; }
 
     // ---- Playback ------------------------------------------------------------
     // Both modes share the <video> element: 'mse' plays the live muxed TS through
@@ -280,8 +269,9 @@
         // stable per device, so re-casting to the same TV replaces its session.
         pid: device,
         // transcoder lets the HA automation cast audio-only targets (e.g. Chromecast Audio)
-        // via http://<transcoder>/audio?id=…&host=… (AAC stream-copy) instead of the muxed TS.
-        transcoder: settings.transcoderHost() || undefined,
+        // via http://<transcoder>/audio?id=…&host=… (AAC stream-copy) instead of the muxed
+        // TS. Same value as host now that the transcoder is path-routed on the engine host.
+        transcoder: settings.engineHost(),
       });
     }
 
@@ -307,7 +297,6 @@
     document.getElementById('btnListen').addEventListener('click', () => {
       const id = settings.id();
       if (!id) { log('Enter an AceStream ID first.'); return; }
-      if (!settings.transcoderHost()) { log('Set the Audio host in Settings first (acestream-audio transcoder).'); return; }
       playback.stop();
       // Server-side audio-only: plain <media> src, no MSE — a fraction of the data.
       const url = audioUrl(id);

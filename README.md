@@ -1,7 +1,7 @@
 # docker-acestream-webplayer
 A bland and boring static website with 3 basic features:
 * Playing Acestreams in browser using mpegts.js
-* Listening to Acestreams audio-only ("Listen"), with lock-screen/car play-pause controls via the Media Session API. Requires an [acestream-audio](https://github.com/trexx/docker-acestream-audio) transcoder ("Audio host" in Settings), which strips the video server-side — ~10-30x less mobile data than the full stream. The cast webhook payload also carries a `transcoder` field so Home Assistant can cast audio-only targets (e.g. Chromecast Audio) from `http://<transcoder>/audio?id=…&host=…` (stream-copied AAC).
+* Listening to Acestreams audio-only ("Listen"), with lock-screen/car play-pause controls via the Media Session API. Requires an [acestream-audio](https://github.com/trexx/docker-acestream-audio) transcoder path-routed on the engine host (the ingress sends `/audio` to the transcoder), which strips the video server-side — ~10-30x less mobile data than the full stream. The cast webhook payload also carries a `transcoder` field (same value as the engine host) so Home Assistant can cast audio-only targets (e.g. Chromecast Audio) from `http://<transcoder>/audio?id=…&host=…` (stream-copied AAC).
 * Casting Acestreams to Android TV's and Chromecasts using Home Assistant automation webhooks. The payload includes a `pid` field (the device name) that the automation should append to the stream URL (`&pid=…`) — the engine uses it to tell player sessions apart, so casting doesn't knock out an in-browser preview and re-casting to the same device cleanly replaces its session. (In-browser playback generates its own random `pid` per playback for the same reason.)
 
 With some basic UI elements to make the above a little easier.
