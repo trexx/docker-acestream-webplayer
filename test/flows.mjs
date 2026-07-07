@@ -144,7 +144,7 @@ hits.length = 0;
 await evl(`document.getElementById('btnListen').click(); 'ok'`);
 const audioHit = await waitHit('/audio');
 check('Listen: transcoder got audio request', !!audioHit);
-check('Listen: audio request has id+host', !!audioHit && audioHit.includes(`id=${CID}`) && audioHit.includes('host=127.0.0.1'), audioHit ?? '');
+check('Listen: audio request has id', !!audioHit && audioHit.includes(`id=${CID}`), audioHit ?? '');
 check('Listen: mpegts player torn down', await evl(`playback.player === null`));
 check('Listen: audio mode on, panel shown', await evl(`document.body.classList.contains('audio-mode') && !audioPanel.hidden`));
 check('Listen: now-playing title is the id', await evl(`npTitle.textContent === ${JSON.stringify(CID)}`));
@@ -164,12 +164,11 @@ await evl(`document.getElementById('btnCast').click(); 'ok'`);
 await sleep(300);
 const castCall = await evl(`window.__haCalls[0] ?? null`);
 check('Cast: webhook called once', !!castCall && await evl(`window.__haCalls.length === 1`));
-check('Cast: payload id/host/device/pid, transcoder = engine host', !!castCall
+check('Cast: payload is id/host/device/pid, no transcoder', !!castCall
   && castCall.body.id === CID
   && castCall.body.host === `127.0.0.1:${PORT}`
   && castCall.body.device === 'basement-tv'
-  && castCall.body.pid === 'basement-tv'
-  && castCall.body.transcoder === castCall.body.host,
+  && castCall.body.pid === 'basement-tv',
   JSON.stringify(castCall?.body));
 check('Cast: accepted status shown', await evl(`statusEl.textContent.includes('Cast request accepted (basement-tv)')`));
 

@@ -102,7 +102,7 @@
 
     function log(msg) {
       statusEl.textContent = msg;
-      console.log('[cast.html]', msg);
+      console.log('[player]', msg);
     }
 
     // ---- Settings (all localStorage access lives here) ----------------------
@@ -149,7 +149,7 @@
     // acestream-audio transcoder (github.com/trexx/docker-acestream-audio): strips video
     // server-side for Listen and audio-only cast targets. Path-routed on the engine
     // host (the ingress sends /audio to the transcoder), so it needs no own setting.
-    function audioUrl(id) { const host = settings.engineHost(); return `http://${host}/audio?id=${id}&host=${host}`; }
+    function audioUrl(id) { return `http://${settings.engineHost()}/audio?id=${id}`; }
 
     // ---- Playback ------------------------------------------------------------
     // Both modes share the <video> element: 'mse' plays the live muxed TS through
@@ -268,10 +268,6 @@
         // pid: engine player id for the automation to append (&pid=) to the getstream URL;
         // stable per device, so re-casting to the same TV replaces its session.
         pid: device,
-        // transcoder lets the HA automation cast audio-only targets (e.g. Chromecast Audio)
-        // via http://<transcoder>/audio?id=…&host=… (AAC stream-copy) instead of the muxed
-        // TS. Same value as host now that the transcoder is path-routed on the engine host.
-        transcoder: settings.engineHost(),
       });
     }
 
