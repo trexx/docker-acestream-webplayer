@@ -1,4 +1,4 @@
-FROM bash:latest AS website
+FROM bash:latest@sha256:a19c811ee9e97fa8a080001d82b8e0ded303f0795cffdb1cbd162731bc8ce208 AS website
 
 # renovate: datasource=npm depName=mpegts.js
 ENV MPEGTS_VERSION="1.8.0"
