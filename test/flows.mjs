@@ -3,11 +3,10 @@
 // (Node 22+ for the built-in WebSocket client). Override the browser binary with
 // BROWSER_BIN (default: thorium-browser).
 //
-// The stub server plays three roles: static host for the page (the page must be
-// served over HTTP — browsers block fetch() from file:// origins to 127.0.0.1,
-// so mpegts.js can never reach the stub from a file:// page), fake engine, and
-// fake transcoder. Stream endpoints send headers and hold the socket open so
-// mpegts stays in "loading" instead of erroring on a garbage payload. The HA
+// The stub server plays two roles: static host for the page (a media element on a
+// file:// page cannot load from 127.0.0.1) and fake rust-acestream-proxy, answering
+// /video and /audio. Both send headers and then hold the socket open, so the media
+// element stays in "loading" instead of erroring on a garbage payload. The HA
 // webhooks are stubbed in-page: nothing leaves the machine.
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -20,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'player');
 const BROWSER_BIN = process.env.BROWSER_BIN || 'thorium-browser';
 
-// ---- stub server: page host + fake engine + fake transcoder -----------------
+// ---- stub server: page host + fake proxy ------------------------------------
 
 const hits = [];
 const sockets = new Set();
@@ -28,13 +27,10 @@ const stub = createServer((req, res) => {
   if (req.url === '/index.html' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(readFileSync(`${ROOT}/index.html`));
-  } else if (req.url === '/mpegts.js') {
-    res.writeHead(200, { 'Content-Type': 'text/javascript' });
-    res.end(readFileSync(`${ROOT}/mpegts.js`));
   } else {
     hits.push(req.url);
-    res.writeHead(200, { 'Content-Type': req.url.startsWith('/audio') ? 'audio/aac' : 'video/mp2t' });
-    // no body, never end: keeps mpegts/media element waiting instead of erroring
+    res.writeHead(200, { 'Content-Type': req.url.startsWith('/audio') ? 'audio/aac' : 'video/mp4' });
+    // no body, never end: keeps the media element waiting instead of erroring
   }
 });
 stub.on('connection', s => sockets.add(s));
@@ -130,22 +126,25 @@ await evl(`
   'ready';
 `);
 
+const VIDEO_URL = `http://127.0.0.1:${PORT}/video?id=${CID}`;
+const AUDIO_URL = `http://127.0.0.1:${PORT}/audio?id=${CID}`;
+
 // --- Stream ---
 await evl(`document.getElementById('btnPreview').click(); 'ok'`);
-check('Stream: status shows loading URL with pid', await evl(`/Loading preview: http:\\/\\/127\\.0\\.0\\.1:${PORT}\\/ace\\/getstream\\?id=${CID}&pid=[a-z0-9]{10,}$/.test(statusEl.textContent)`), await evl(`statusEl.textContent`));
-const tsHit = await waitHit('/ace/getstream');
-check('Stream: engine got getstream request', !!tsHit);
-check('Stream: request has content id + pid', !!tsHit && tsHit.includes(`id=${CID}`) && /pid=[a-z0-9]{10,}/.test(tsHit), tsHit ?? '');
-check('Stream: mpegts player instantiated', await evl(`playback.player !== null`));
+check('Stream: status shows the proxy /video URL', await evl(`statusEl.textContent === ${JSON.stringify('Streaming: ' + VIDEO_URL)}`), await evl(`statusEl.textContent`));
+const videoHit = await waitHit('/video');
+check('Stream: proxy got the video request', !!videoHit);
+check('Stream: request carries the id and nothing else (no pid)', videoHit === `/video?id=${CID}`, videoHit ?? '');
+check('Stream: element src points at the proxy', await evl(`video.src === ${JSON.stringify(VIDEO_URL)}`));
 check('Stream: not in audio mode', await evl(`!document.body.classList.contains('audio-mode')`));
 
 // --- Listen ---
 hits.length = 0;
 await evl(`document.getElementById('btnListen').click(); 'ok'`);
 const audioHit = await waitHit('/audio');
-check('Listen: transcoder got audio request', !!audioHit);
-check('Listen: audio request has id', !!audioHit && audioHit.includes(`id=${CID}`), audioHit ?? '');
-check('Listen: mpegts player torn down', await evl(`playback.player === null`));
+check('Listen: proxy got the audio request', !!audioHit);
+check('Listen: audio request carries the id', audioHit === `/audio?id=${CID}`, audioHit ?? '');
+check('Listen: element src swapped to /audio', await evl(`video.src === ${JSON.stringify(AUDIO_URL)}`));
 check('Listen: audio mode on, panel shown', await evl(`document.body.classList.contains('audio-mode') && !audioPanel.hidden`));
 check('Listen: now-playing title is the id', await evl(`npTitle.textContent === ${JSON.stringify(CID)}`));
 
@@ -153,30 +152,43 @@ check('Listen: now-playing title is the id', await evl(`npTitle.textContent === 
 await evl(`document.getElementById('btnExitAudio').click(); 'ok'`);
 check('Exit audio: class removed, panel hidden', await evl(`!document.body.classList.contains('audio-mode') && audioPanel.hidden`));
 
-// --- Stream again while direct-src audio is active (teardown branch) ---
+// --- Stream again while the audio stream is active (teardown branch) ---
 hits.length = 0;
 await evl(`document.getElementById('btnPreview').click(); 'ok'`);
-check('Restream: direct src cleared, mse player up', await evl(`playback.player !== null && !video.getAttribute('src')`));
-check('Restream: engine hit with fresh pid', !!(await waitHit('/ace/getstream')));
+check('Restream: src swapped back to /video', await evl(`video.src === ${JSON.stringify(VIDEO_URL)}`));
+check('Restream: proxy hit again', !!(await waitHit('/video')));
 
 // --- Cast ---
 await evl(`document.getElementById('btnCast').click(); 'ok'`);
 await sleep(300);
 const castCall = await evl(`window.__haCalls[0] ?? null`);
 check('Cast: webhook called once', !!castCall && await evl(`window.__haCalls.length === 1`));
-check('Cast: payload is id/host/device/pid, no transcoder', !!castCall
-  && castCall.body.id === CID
-  && castCall.body.host === `127.0.0.1:${PORT}`
+check('Cast: payload is {url, device}, url is the proxy /video', !!castCall
+  && castCall.body.url === VIDEO_URL
   && castCall.body.device === 'basement-tv'
-  && castCall.body.pid === 'basement-tv',
+  && Object.keys(castCall.body).length === 2,
   JSON.stringify(castCall?.body));
 check('Cast: accepted status shown', await evl(`statusEl.textContent.includes('Cast request accepted (basement-tv)')`));
+
+// --- Cast to an audio-only target ---
+await evl(`
+  deviceEl.value = 'amp';
+  deviceEl.dispatchEvent(new Event('change'));
+  document.getElementById('btnCast').click();
+  'ok'
+`);
+await sleep(300);
+const audioCast = await evl(`window.__haCalls[1] ?? null`);
+check('Cast: audio-only device is sent /audio', !!audioCast
+  && audioCast.body.url === AUDIO_URL
+  && audioCast.body.device === 'amp',
+  JSON.stringify(audioCast?.body));
 
 // --- Stop cast ---
 await evl(`document.getElementById('btnStop').click(); 'ok'`);
 await sleep(300);
-const stopCall = await evl(`window.__haCalls[1] ?? null`);
-check('Stop: payload is {device}', !!stopCall && stopCall.body.device === 'basement-tv' && Object.keys(stopCall.body).length === 1, JSON.stringify(stopCall?.body));
+const stopCall = await evl(`window.__haCalls[2] ?? null`);
+check('Stop: payload is {device}', !!stopCall && stopCall.body.device === 'amp' && Object.keys(stopCall.body).length === 1, JSON.stringify(stopCall?.body));
 
 // --- Persistence ---
 check('Persist: id/host saved', await evl(`
@@ -194,7 +206,7 @@ check('Reload: inputs + device restored', await evl(`
   deviceEl.value === 'living-room-tv'
 `));
 
-const realErrors = pageErrors.filter(t => !/mpegts|MediaError|demux/i.test(t));
+const realErrors = pageErrors.filter(t => !/MediaError/i.test(t));
 check('No unexpected page exceptions', realErrors.length === 0, JSON.stringify(realErrors));
 
 // ---- teardown ------------------------------------------------------------------
@@ -203,6 +215,9 @@ browser.kill();
 await new Promise(r => browser.once('exit', r)); // profile dir is busy until the browser is gone
 for (const s of sockets) s.destroy();
 stub.close();
-rmSync(profileDir, { recursive: true, force: true, maxRetries: 5 });
+// The browser can still be flushing its profile as it exits; a leftover temp dir must
+// not turn a passing run into a failing one.
+try { rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+catch (e) { console.log(`(left ${profileDir} behind: ${e.code})`); }
 console.log(failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

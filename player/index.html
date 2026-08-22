@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Boring AceStream Player</title>
-  <script src="mpegts.js"></script>
   <link rel="icon" href="data:,">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -79,14 +78,25 @@
   <script>
     // ---- Config ------------------------------------------------------------
 
+    // Every stream comes from rust-acestream-proxy (github.com/trexx/rust-acestream-proxy),
+    // path-routed on this host: /video is fragmented MP4 with the video track stream-copied,
+    // /audio is audio only. The proxy pulls each content id from the engine once and fans it
+    // out, so a browser preview, a TV and a car radio on the same id cost one engine session
+    // between them.
     const DEFAULT_HOST = 'acestream.apps.pixelman.me';
 
-    // Casting goes through Home Assistant: the page POSTs to a webhook, an HA automation
-    // calls media_player.play_media on the chosen Chromecast. Works the same on desktop and
-    // mobile (the Web Sender SDK was dropped because it doesn't work on mobile browsers).
+    // Casting goes through Home Assistant: the page POSTs the stream URL to a webhook, an HA
+    // automation calls media_player.play_media on the chosen device. Works the same on desktop
+    // and mobile (the Web Sender SDK was dropped because it doesn't work on mobile browsers).
     const HA_CAST_WEBHOOK = 'https://hass.apps.pixelman.me/api/webhook/0615c2465c362a0efa0c23d7e574847e';
     const HA_STOP_WEBHOOK = 'https://hass.apps.pixelman.me/api/webhook/03cde423f9aade35142368190c9925b8';
-    const CAST_DEVICES = ['basement-tv', 'living-room-tv', 'amp']; // must match the HA automation's devices map
+    // Names must match the HA automation's devices map. `audio` marks a target that can't
+    // decode video (Chromecast Audio, an amp) — it is cast /audio, everything else /video.
+    const CAST_DEVICES = [
+      { name: 'basement-tv' },
+      { name: 'living-room-tv' },
+      { name: 'amp', audio: true },
+    ];
 
     // ---- DOM + status ------------------------------------------------------
 
@@ -116,7 +126,7 @@
         hostEl.value = localStorage.getItem('engineHost') || '';
         wakeEl.checked = localStorage.getItem('keepScreenOn') === 'true';
         const device = localStorage.getItem('castDevice');
-        if (device && CAST_DEVICES.includes(device)) deviceEl.value = device;
+        if (device && CAST_DEVICES.some(d => d.name === device)) deviceEl.value = device;
       },
       id() {
         const id = idEl.value.trim();
@@ -137,67 +147,34 @@
     };
 
     // ---- Stream URLs ---------------------------------------------------------
+    // Both endpoints take nothing but the content id. The engine's player id (pid), which
+    // used to be generated here so a cast wouldn't knock out an in-browser preview, is now
+    // the proxy's business: it holds one engine session per id and fans it out to every
+    // listener, so there is nothing left for two viewers to collide over.
+    //
+    // Plain http throughout, cast targets included: the page is served over http and a Cast
+    // receiver plays an http media URL happily, so there is no reason for the two to differ.
 
-    // The engine treats getstream requests without distinct player ids (pid) as the same
-    // session and stops serving the old one when a new request arrives, so every client
-    // gets its own. Per-playback (not per-device) so two tabs don't collide. No
-    // crypto.randomUUID: the page runs over plain HTTP where it's unavailable.
-    function newPid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
-
-    function tsUrl(id) { return `http://${settings.engineHost()}/ace/getstream?id=${id}&pid=${newPid()}`; }
-
-    // acestream-audio transcoder (github.com/trexx/docker-acestream-audio): strips video
-    // server-side for Listen and audio-only cast targets. Path-routed on the engine
-    // host (the ingress sends /audio to the transcoder), so it needs no own setting.
+    function videoUrl(id) { return `http://${settings.engineHost()}/video?id=${id}`; }
     function audioUrl(id) { return `http://${settings.engineHost()}/audio?id=${id}`; }
 
     // ---- Playback ------------------------------------------------------------
-    // Both modes share the <video> element: 'mse' plays the live muxed TS through
-    // mpegts.js, 'direct' points src straight at the transcoder's audio stream.
+    // One path for both modes, because the proxy hands the <video> element something it can
+    // play natively either way: fragmented MP4 on /video, ADTS on /audio. No demuxer, no MSE
+    // plumbing — attaching mid-stream is the proxy's problem, and it solves it by replaying
+    // the init segment and starting each new listener on a fragment boundary.
 
     const playback = {
-      player: null, // mpegts.js instance (mse mode only)
-
-      startMse(url) {
-        if (!mpegts.getFeatureList().mseLivePlayback) {
-          log('MSE live playback not supported in this browser.');
-          return false;
-        }
-        this.player = mpegts.createPlayer(
-          { type: 'mpegts', isLive: true, url },
-          {
-            enableWorker: true,           // demux/remux off the main thread
-            enableWorkerForMSE: true,     // also use worker for MSE updates (default false, main thread)
-            enableStashBuffer: false      // ~384KB input-side cushion against fetch-side jitter
-          }
-        );
-        this.player.on(mpegts.Events.ERROR, (type, detail) => {
-          log('mpegts.js error: ' + type + ' / ' + JSON.stringify(detail));
-        });
-        this.player.attachMediaElement(video);
-        this.player.load();
-        this.player.play().catch(e => log('play() rejected: ' + e.message));
-        return true;
-      },
-
-      startDirect(url) {
+      start(url) {
         video.src = url;
         video.play().catch(e => log('play() rejected: ' + e.message));
       },
 
       stop() {
-        if (this.player) {
-          this.player.pause();
-          this.player.unload();
-          this.player.detachMediaElement();
-          this.player.destroy();
-          this.player = null;
-        } else if (video.src) {
-          // direct-src teardown — mpegts handles its own element state above
-          video.pause();
-          video.removeAttribute('src');
-          video.load();
-        }
+        if (!video.src) return;
+        video.pause();
+        video.removeAttribute('src');
+        video.load(); // drops the buffered stream and closes the connection to the proxy
       },
     };
 
@@ -259,21 +236,18 @@
         .catch(e => log(`${kind} request error: ` + e.message));
     }
 
+    // The page picks the endpoint and hands HA a finished URL, so the automation only has to
+    // call play_media with it — it needs to know nothing about the proxy or which targets are
+    // audio-only.
     function cast(id, device) {
-      log(`Casting to ${device} via HA…`);
-      haRequest('Cast', HA_CAST_WEBHOOK, {
-        id,
-        host: settings.engineHost(),
-        device,
-        // pid: engine player id for the automation to append (&pid=) to the getstream URL;
-        // stable per device, so re-casting to the same TV replaces its session.
-        pid: device,
-      });
+      const url = device.audio ? audioUrl(id) : videoUrl(id);
+      log(`Casting to ${device.name} via HA…`);
+      haRequest('Cast', HA_CAST_WEBHOOK, { url, device: device.name });
     }
 
     // ---- Wiring + init ---------------------------------------------------------
 
-    for (const name of CAST_DEVICES) {
+    for (const { name } of CAST_DEVICES) {
       const opt = document.createElement('option');
       opt.value = name;
       opt.textContent = name;
@@ -286,17 +260,18 @@
       if (!id) { log('Enter an AceStream ID first.'); return; }
       playback.stop();
       exitAudioMode();
-      const url = tsUrl(id);
-      if (playback.startMse(url)) log('Loading preview: ' + url);
+      const url = videoUrl(id);
+      playback.start(url);
+      log('Streaming: ' + url);
     });
 
     document.getElementById('btnListen').addEventListener('click', () => {
       const id = settings.id();
       if (!id) { log('Enter an AceStream ID first.'); return; }
       playback.stop();
-      // Server-side audio-only: plain <media> src, no MSE — a fraction of the data.
+      // Server-side audio-only — a fraction of the data of the full stream.
       const url = audioUrl(id);
-      playback.startDirect(url);
+      playback.start(url);
       enterAudioMode(id);
       log('Listening (audio only): ' + url);
     });
@@ -304,8 +279,9 @@
     document.getElementById('btnCast').addEventListener('click', () => {
       const id = settings.id();
       if (!id) { log('Enter an AceStream ID first.'); return; }
-      if (!deviceEl.value) { log('Pick a cast device first.'); return; }
-      cast(id, deviceEl.value);
+      const device = CAST_DEVICES.find(d => d.name === deviceEl.value);
+      if (!device) { log('Pick a cast device first.'); return; }
+      cast(id, device);
     });
 
     document.getElementById('btnStop').addEventListener('click', () => {

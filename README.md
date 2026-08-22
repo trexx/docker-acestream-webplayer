@@ -1,14 +1,36 @@
 # docker-acestream-webplayer
 A bland and boring static website with 3 basic features:
-* Playing Acestreams in browser using mpegts.js
-* Listening to Acestreams audio-only ("Listen"), with lock-screen/car play-pause controls via the Media Session API. Requires an [acestream-audio](https://github.com/trexx/docker-acestream-audio) transcoder path-routed on the engine host (the ingress sends `/audio` to the transcoder), which strips the video server-side — ~10-30x less mobile data than the full stream. Home Assistant can cast audio-only targets (e.g. Chromecast Audio) the same way, from `http://<host from the cast payload>/audio?id=…` (stream-copied AAC).
-* Casting Acestreams to Android TV's and Chromecasts using Home Assistant automation webhooks. The payload includes a `pid` field (the device name) that the automation should append to the stream URL (`&pid=…`) — the engine uses it to tell player sessions apart, so casting doesn't knock out an in-browser preview and re-casting to the same device cleanly replaces its session. (In-browser playback generates its own random `pid` per playback for the same reason.)
+* Playing Acestreams in browser, as fragmented MP4 with the video track stream-copied
+* Listening to Acestreams audio-only ("Listen"), with lock-screen/car play-pause controls via the Media Session API — ~10-30x less mobile data than the full stream
+* Casting Acestreams to Android TV's and Chromecasts using Home Assistant automation webhooks
 
 With some basic UI elements to make the above a little easier.
 
+## Everything goes through the proxy
+
+No button talks to the AceStream engine directly. All three fetch from [rust-acestream-proxy](https://github.com/trexx/rust-acestream-proxy), path-routed on the engine host (the ingress sends `/video` and `/audio` to the proxy):
+
+| Button | URL | What comes back |
+| --- | --- | --- |
+| Stream | `http://<host>/video?id=…` | fragmented MP4 — video stream-copied, audio AAC. `<video>` plays it natively, so the page ships no player library |
+| Listen | `http://<host>/audio?id=…` | ADTS AAC, video stripped server-side |
+| Cast | one of the above | chosen per device: entries marked `audio: true` in `CAST_DEVICES` are sent `/audio`, the rest `/video` |
+
+The proxy holds one engine session per content id and fans it out, which is why no `pid` appears anywhere any more. A browser preview, a TV and a phone on the same stream now cost the engine one pull between them and cannot knock each other off — the job a distinct player id per client used to do.
+
+## Home Assistant automation
+
+The cast webhook payload is a finished URL, so the automation only has to hand it to `media_player.play_media`:
+
+```json
+{ "url": "http://acestream.apps.pixelman.me/video?id=…", "device": "basement-tv" }
+```
+
+Audio targets (Chromecast Audio, an amp) arrive as `/audio` URLs and want `media_content_type: "music"`. The stop webhook payload is unchanged: `{ "device": "…" }`.
+
 ## Testing
 
-`node test/flows.mjs` (Node 22+, no dependencies) drives every UI flow — Stream, Listen, audio mode, Cast, Stop, settings persistence — in a headless Chromium-family browser against a local stub engine/transcoder, with the HA webhooks stubbed in-page, so nothing leaves the machine. Set `BROWSER_BIN` to pick the browser (default `thorium-browser`).
+`node test/flows.mjs` (Node 22+, no dependencies) drives every UI flow — Stream, Listen, audio mode, Cast to a video and to an audio target, Stop, settings persistence — in a headless Chromium-family browser against a local stub proxy, with the HA webhooks stubbed in-page, so nothing leaves the machine. Set `BROWSER_BIN` to pick the browser (default `thorium-browser`).
 
 ## Deployment
 

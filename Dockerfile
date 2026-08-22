@@ -1,14 +1,9 @@
 FROM bash:latest@sha256:a19c811ee9e97fa8a080001d82b8e0ded303f0795cffdb1cbd162731bc8ce208 AS website
 
-# renovate: datasource=npm depName=mpegts.js
-ENV MPEGTS_VERSION="1.8.2"
-
 COPY ./player /app
 
-RUN apk add --no-cache curl gzip
-RUN curl -fsSL "https://registry.npmjs.org/mpegts.js/-/mpegts.js-${MPEGTS_VERSION}.tgz" \
-      | tar -xzOf - package/dist/mpegts.js > /app/mpegts.js
-RUN /usr/bin/env bash -O globstar -c 'gzip -9 /app/**/*.{html,js}'
+RUN apk add --no-cache gzip
+RUN /usr/bin/env bash -O globstar -c 'gzip -9 /app/**/*.html'
 
 # Compile scratch image
 FROM scratch AS compile
