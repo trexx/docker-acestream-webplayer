@@ -1,4 +1,4 @@
-FROM bash:latest@sha256:b44c25360c4af785f74b4535467be3a68b6c770bbd1332df4b31f4b7b92503b3 AS website
+FROM bash:latest@sha256:d07824ed325ed1faa6b54f9413f92c5b7acdd600f90d780904ed09a8d72a8d20 AS website
 
 COPY ./player /app
 
