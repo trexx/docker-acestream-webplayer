@@ -5,7 +5,13 @@ on:
     tags: [ '*.*.*' ]
 
 jobs:
+  test:
+    uses: './.github/workflows/test.yml'
+    permissions:
+      contents: 'read'
+
   build:
+    needs: 'test'
     uses: 'trexx/actions/.github/workflows/build.yml@main'
     secrets: 'inherit'
     permissions:
