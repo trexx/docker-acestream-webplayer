@@ -1,12 +1,14 @@
-FROM bash:latest@sha256:d07824ed325ed1faa6b54f9413f92c5b7acdd600f90d780904ed09a8d72a8d20 AS website
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS website
 
 COPY ./player /app
 
-RUN apk add --no-cache gzip
-RUN /usr/bin/env bash -O globstar -c 'gzip -9 /app/**/*.html'
+# busybox gzip, already in the base image. The plain file is deliberately not
+# kept: busybox httpd serves index.html.gz to any client that accepts gzip,
+# which every browser does.
+RUN find /app -name '*.html' -exec gzip -9 {} +
 
 # Compile scratch image
 FROM scratch AS compile
-LABEL org.opencontainers.image.source="https://github.com/trexx/docker-ace-player"
+LABEL org.opencontainers.image.source="https://github.com/trexx/docker-acestream-webplayer"
 
 COPY --from=website /app /
