@@ -58,6 +58,7 @@
   <div class="buttons">
     <button class="primary" id="btnPreview">Stream</button>
     <button id="btnListen">Listen</button>
+    <button id="btnVlc" hidden>Open in VLC</button>
     <button id="btnCast">Cast</button>
     <button class="danger" id="btnStop">Stop cast</button>
     <select id="castDevice" aria-label="Cast device"></select>
@@ -164,6 +165,23 @@
     function videoUrl(id) { return `http://${settings.proxyHost()}/video?id=${id}`; }
     function audioUrl(id) { return `http://${settings.proxyHost()}/audio?id=${id}`; }
 
+    // ---- VLC (iPhone, iPad) --------------------------------------------------
+    // Safari won't play /video: its media stack opens with a byte-range probe and takes live
+    // media only as HLS, so an endless MP4 with no length is refused. VLC for iOS has its own
+    // demuxer and plays it as is, so on Apple touch devices the page offers to hand the
+    // stream over. It is still the proxy's /video, so it shares the one engine pull.
+    // x-success brings the user back here when playback ends.
+    //
+    // An iPad asks for the desktop site and calls itself a Mac, so it is told apart by its
+    // touch points.
+    const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+      || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+
+    function vlcUrl(id) {
+      return 'vlc-x-callback://x-callback-url/stream'
+        + `?url=${encodeURIComponent(videoUrl(id))}&x-success=${encodeURIComponent(location.href)}`;
+    }
+
     // ---- Playback ------------------------------------------------------------
     // One path for both modes, because the proxy hands the <video> element something it can
     // play natively either way: fragmented MP4 on /video, ADTS on /audio. No demuxer, no MSE
@@ -173,9 +191,11 @@
     // play() returns a promise that rejects on autoplay policy or a dead source;
     // every caller wants the same thing done with that, so it lives here once.
     // A dead source has already been reported by the 'error' handler with the
-    // element's own reason, so that rejection is not reported a second time.
+    // element's own reason, so that rejection is not reported a second time. An
+    // AbortError only means a newer stop or start interrupted this play(); reporting
+    // it would overwrite whatever that newer action just logged.
     function safePlay() {
-      video.play().catch(e => { if (!video.error) log('play() rejected: ' + e.message); });
+      video.play().catch(e => { if (!video.error && e.name !== 'AbortError') log('play() rejected: ' + e.message); });
     }
 
     const playback = {
@@ -304,6 +324,17 @@
       cast(id, device);
     });
 
+    const btnVlc = document.getElementById('btnVlc');
+    btnVlc.hidden = !IS_IOS;
+    btnVlc.addEventListener('click', () => {
+      const id = settings.id();
+      if (!id) return;
+      playback.stop(); // VLC pulls the stream itself; don't pay for it twice
+      exitAudioMode();
+      log('Opening in VLC: ' + videoUrl(id) + '\nNothing happening? Install VLC for iOS from the App Store.');
+      location.href = vlcUrl(id);
+    });
+
     document.getElementById('btnStop').addEventListener('click', () => {
       if (!deviceEl.value) { log('Pick a cast device first.'); return; }
       haRequest('Stop', HA_STOP_WEBHOOK, { device: deviceEl.value });
@@ -323,6 +354,12 @@
     video.addEventListener('error', () => {
       if (!video.error) return;
       const detail = video.error.message || 'code ' + video.error.code;
+      // Safari refuses /video whatever the proxy says, so there the way out is VLC, not the
+      // proxy log.
+      if (IS_IOS && !document.body.classList.contains('audio-mode')) {
+        log(`Safari cannot play this stream (${detail}); try Open in VLC.`);
+        return;
+      }
       // A proxy 400/502 arrives here as "source not supported": the element cannot
       // show the response body, so the proxy's reason is only in the proxy's log.
       log(video.error.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED

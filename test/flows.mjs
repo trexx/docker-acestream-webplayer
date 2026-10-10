@@ -259,6 +259,45 @@ check('Refused stream: reported as refused, not as a play() rejection',
   await evl(`statusEl.textContent`));
 console.log('      status was: ' + await evl(`statusEl.textContent`));
 
+// --- Open in VLC: offered only on iPhone/iPad ---
+check('VLC: button hidden on a desktop browser', await evl(`document.getElementById('btnVlc').hidden`));
+
+// An iPad asking for the desktop site: a Mac user agent with touch points.
+await send('Emulation.setUserAgentOverride', {
+  userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15',
+});
+await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+await navigate(`http://127.0.0.1:${PORT}/index.html`);
+check('VLC: button shown on an iPad', await evl(`!document.getElementById('btnVlc').hidden`));
+
+// The refused id above was saved, so the reload brought it back: a stream that fails here
+// is what Safari does to every /video, and the way out it should offer is VLC.
+await click('btnPreview');
+check('VLC: a failed stream on an iPad points at VLC, not the proxy log',
+  await untilPage(`statusEl.textContent.startsWith('Safari cannot play this stream (') && statusEl.textContent.endsWith('try Open in VLC.')`),
+  await evl(`statusEl.textContent`));
+
+await evl(`idEl.value = ${JSON.stringify(CID)}; 'ok'`);
+const PAGE_URL = `http://127.0.0.1:${PORT}/index.html`;
+check('VLC: x-callback URL carries the encoded /video URL and a way back',
+  await evl(`vlcUrl(${JSON.stringify(CID)})`) === 'vlc-x-callback://x-callback-url/stream'
+    + `?url=${encodeURIComponent(VIDEO_URL)}&x-success=${encodeURIComponent(PAGE_URL)}`,
+  await evl(`vlcUrl(${JSON.stringify(CID)})`));
+
+// Hand-off stops in-page playback first, so the iPad doesn't pull the stream twice. The
+// browser has no handler for the scheme, so the page stays put.
+hits.length = 0;
+await click('btnPreview');
+check('VLC: in-page stream started first', await waitHit(`/video?id=${CID}`) === `/video?id=${CID}`);
+await click('btnVlc');
+check('VLC: in-page playback stopped', await untilPage(`!video.getAttribute('src')`), await evl(`video.src`));
+check('VLC: status says where the stream went', await untilPage(`statusEl.textContent.startsWith(${JSON.stringify('Opening in VLC: ' + VIDEO_URL)})`), await evl(`statusEl.textContent`));
+// Give a stale play() rejection from the stopped stream time to land; it must not
+// overwrite the hand-off message.
+await sleep(500);
+check('VLC: hand-off status survives the stopped stream', await evl(`statusEl.textContent.startsWith('Opening in VLC: ')`), await evl(`statusEl.textContent`));
+await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+
 const realErrors = pageErrors.filter(t => !/MediaError/i.test(t));
 check('No unexpected page exceptions', realErrors.length === 0, JSON.stringify(realErrors));
 
