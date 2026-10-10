@@ -118,8 +118,9 @@
 
     // ---- Settings (all localStorage access lives here) ----------------------
     // Text inputs persist when their value is used (a button click), not per
-    // keystroke. A cleared or rejected AceStream ID, or a cleared proxy host,
-    // keeps the previously saved value on reload. The host is stored under the
+    // keystroke: target() is called once per click and saves both, so nothing
+    // else here writes. A cleared or rejected AceStream ID, or a cleared proxy
+    // host, keeps the previously saved value on reload. The host is stored under the
     // key 'engineHost' from when the page talked to the engine directly; the
     // key is kept so nobody loses a saved setting over a rename.
 
@@ -131,23 +132,18 @@
         const device = localStorage.getItem('castDevice');
         if (device && CAST_DEVICES.some(d => d.name === device)) deviceEl.value = device;
       },
-      // Logs and returns null when there is nothing usable. The format check
-      // mirrors the proxy's own (a 40-char hex content id): anything else would
-      // come back as a 400 that the <video> element can only report as "code 4".
-      id() {
+      // What a button acts on: { id, host }, or null (having logged why) when
+      // there is no usable id. The format check mirrors the proxy's own (a 40-char
+      // hex content id): anything else would come back as a 400 that the <video>
+      // element can only report as "code 4".
+      target() {
         const id = idEl.value.trim();
         if (!id) { log('Enter an AceStream ID first.'); return null; }
         if (!/^[0-9a-f]{40}$/i.test(id)) { log('AceStream ID must be 40 hex characters.'); return null; }
         localStorage.setItem('acestreamId', id);
-        return id;
-      },
-      proxyHost() {
         const host = hostEl.value.trim();
-        if (host) {
-          localStorage.setItem('engineHost', host);
-          return host;
-        }
-        return DEFAULT_HOST;
+        if (host) localStorage.setItem('engineHost', host);
+        return { id, host: host || DEFAULT_HOST };
       },
       saveKeepScreenOn() { localStorage.setItem('keepScreenOn', wakeEl.checked); },
       saveCastDevice() { localStorage.setItem('castDevice', deviceEl.value); },
@@ -162,8 +158,8 @@
     // Plain http throughout, cast targets included: the page is served over http and a Cast
     // receiver plays an http media URL happily, so there is no reason for the two to differ.
 
-    function videoUrl(id) { return `http://${settings.proxyHost()}/video?id=${id}`; }
-    function audioUrl(id) { return `http://${settings.proxyHost()}/audio?id=${id}`; }
+    function videoUrl({ id, host }) { return `http://${host}/video?id=${id}`; }
+    function audioUrl({ id, host }) { return `http://${host}/audio?id=${id}`; }
 
     // ---- VLC (iPhone, iPad) --------------------------------------------------
     // Safari won't play /video: its media stack opens with a byte-range probe and takes live
@@ -177,9 +173,9 @@
     const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
       || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
 
-    function vlcUrl(id) {
+    function vlcUrl(streamUrl) {
       return 'vlc-x-callback://x-callback-url/stream'
-        + `?url=${encodeURIComponent(videoUrl(id))}&x-success=${encodeURIComponent(location.href)}`;
+        + `?url=${encodeURIComponent(streamUrl)}&x-success=${encodeURIComponent(location.href)}`;
     }
 
     // ---- Playback ------------------------------------------------------------
@@ -246,7 +242,14 @@
     // locked page awake (the OS releases it on lock) — Media Session covers that case.
 
     let wakeLock = null;
-    async function applyWakeLock() {
+    // Calls are queued: 'change' and 'visibilitychange' can fire together, and two
+    // overlapping runs would both see no lock while the first request is in flight,
+    // and both take one.
+    let wakeLockQueue = Promise.resolve();
+    function applyWakeLock() {
+      wakeLockQueue = wakeLockQueue.then(syncWakeLock);
+    }
+    async function syncWakeLock() {
       const want = wakeEl.checked && document.visibilityState === 'visible';
       if (want && !wakeLock && 'wakeLock' in navigator) {
         try {
@@ -256,8 +259,9 @@
           log('Wake lock unavailable: ' + e.message);
         }
       } else if (!want && wakeLock) {
-        wakeLock.release();
+        const lock = wakeLock;
         wakeLock = null;
+        await lock.release();
       }
     }
 
@@ -278,8 +282,8 @@
     // The page picks the endpoint and hands HA a finished URL, so the automation only has to
     // call play_media with it — it needs to know nothing about the proxy or which targets are
     // audio-only.
-    function cast(id, device) {
-      const url = device.audio ? audioUrl(id) : videoUrl(id);
+    function cast(target, device) {
+      const url = device.audio ? audioUrl(target) : videoUrl(target);
       log(`Casting to ${device.name} via HA…`);
       haRequest('Cast', HA_CAST_WEBHOOK, { url, device: device.name });
     }
@@ -296,43 +300,44 @@
     settings.load(); // after the <select> has its options, so the saved device applies
 
     document.getElementById('btnPreview').addEventListener('click', () => {
-      const id = settings.id();
-      if (!id) return;
+      const target = settings.target();
+      if (!target) return;
       playback.stop();
       exitAudioMode();
-      const url = videoUrl(id);
+      const url = videoUrl(target);
       playback.start(url);
       log('Streaming: ' + url);
     });
 
     document.getElementById('btnListen').addEventListener('click', () => {
-      const id = settings.id();
-      if (!id) return;
+      const target = settings.target();
+      if (!target) return;
       playback.stop();
       // Server-side audio-only — a fraction of the data of the full stream.
-      const url = audioUrl(id);
+      const url = audioUrl(target);
       playback.start(url);
-      enterAudioMode(id);
+      enterAudioMode(target.id);
       log('Listening (audio only): ' + url);
     });
 
     document.getElementById('btnCast').addEventListener('click', () => {
-      const id = settings.id();
-      if (!id) return;
+      const target = settings.target();
+      if (!target) return;
       const device = CAST_DEVICES.find(d => d.name === deviceEl.value);
       if (!device) { log('Pick a cast device first.'); return; }
-      cast(id, device);
+      cast(target, device);
     });
 
     const btnVlc = document.getElementById('btnVlc');
     btnVlc.hidden = !IS_IOS;
     btnVlc.addEventListener('click', () => {
-      const id = settings.id();
-      if (!id) return;
+      const target = settings.target();
+      if (!target) return;
       playback.stop(); // VLC pulls the stream itself; don't pay for it twice
       exitAudioMode();
-      log('Opening in VLC: ' + videoUrl(id) + '\nNothing happening? Install VLC for iOS from the App Store.');
-      location.href = vlcUrl(id);
+      const url = videoUrl(target);
+      log('Opening in VLC: ' + url + '\nNothing happening? Install VLC for iOS from the App Store.');
+      location.href = vlcUrl(url);
     });
 
     document.getElementById('btnStop').addEventListener('click', () => {

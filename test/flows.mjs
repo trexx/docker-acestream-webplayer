@@ -250,6 +250,31 @@ check('Reload: inputs + device + wake restored', await evl(`
 `));
 check('Reload: host placeholder is the default proxy', await evl(`hostEl.placeholder === DEFAULT_HOST && DEFAULT_HOST.length > 0`));
 
+// --- Wake lock: overlapping triggers take one lock, not one each ---
+// A stub whose request resolves late, so the second trigger lands while the first is
+// still in flight — the window in which both used to see no lock and both request one.
+const wake = await evl(`(async () => {
+  wakeEl.checked = false;
+  applyWakeLock();
+  await wakeLockQueue;
+  let requests = 0;
+  const stubLock = () => Object.assign(new EventTarget(), { release: async () => {} });
+  Object.defineProperty(navigator, 'wakeLock', { configurable: true, value: {
+    request: () => { requests++; return new Promise(r => setTimeout(() => r(stubLock()), 50)); },
+  } });
+  wakeEl.checked = true;
+  wakeEl.dispatchEvent(new Event('change'));
+  document.dispatchEvent(new Event('visibilitychange'));
+  await wakeLockQueue;
+  const held = wakeLock !== null;
+  wakeEl.checked = false;
+  applyWakeLock();
+  await wakeLockQueue;
+  return { requests, held, releasedAfter: wakeLock === null };
+})()`);
+check('Wake lock: overlapping triggers request one lock', wake.requests === 1 && wake.held, JSON.stringify(wake));
+check('Wake lock: unchecking releases it', wake.releasedAfter, JSON.stringify(wake));
+
 // --- A refused stream surfaces as a media error, not silence ---
 await evl(`idEl.value = ${JSON.stringify(ERR_CID)}; 'ok'`);
 await click('btnPreview');
@@ -279,10 +304,11 @@ check('VLC: a failed stream on an iPad points at VLC, not the proxy log',
 
 await evl(`idEl.value = ${JSON.stringify(CID)}; 'ok'`);
 const PAGE_URL = `http://127.0.0.1:${PORT}/index.html`;
+const vlcHref = await evl(`vlcUrl(videoUrl(settings.target()))`);
 check('VLC: x-callback URL carries the encoded /video URL and a way back',
-  await evl(`vlcUrl(${JSON.stringify(CID)})`) === 'vlc-x-callback://x-callback-url/stream'
+  vlcHref === 'vlc-x-callback://x-callback-url/stream'
     + `?url=${encodeURIComponent(VIDEO_URL)}&x-success=${encodeURIComponent(PAGE_URL)}`,
-  await evl(`vlcUrl(${JSON.stringify(CID)})`));
+  vlcHref);
 
 // Hand-off stops in-page playback first, so the iPad doesn't pull the stream twice. The
 // browser has no handler for the scheme, so the page stays put.
