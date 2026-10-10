@@ -12,11 +12,15 @@ No button talks to the AceStream engine directly. All three fetch from [rust-ace
 
 | Button | URL | What comes back |
 | --- | --- | --- |
-| Stream | `http://<host>/video?id=…` | fragmented MP4 — video stream-copied, audio AAC. `<video>` plays it natively, so the page ships no player library |
+| Stream | `http://<host>/video?id=…` | fragmented MP4 — video stream-copied, audio AAC. `<video>` plays it natively, so the page ships no player library — except in Safari (see below) |
 | Listen | `http://<host>/audio?id=…` | ADTS AAC, video stripped server-side |
 | Cast | one of the above | chosen per device: entries marked `audio: true` in `CAST_DEVICES` are sent `/audio`, the rest `/video` |
 
 The proxy holds one engine session per content id and fans it out, which is why no `pid` appears anywhere any more. A browser preview, a TV and a phone on the same stream now cost the engine one pull between them and cannot knock each other off — the job a distinct player id per client used to do.
+
+## Safari, iPad and iPhone
+
+Safari's `<video>` won't play `/video` from its URL: it opens every progressive download with a byte-range probe and accepts live media only as HLS, so an endless MP4 with no length is refused. Where `ManagedMediaSource` exists (Safari 17+, iPadOS/iOS 17.1+), Stream instead `fetch`es `/video` itself and appends it to a SourceBuffer, with the codecs read from the init segment. The proxy's output is already MSE-shaped, so nothing changes server-side. The page keeps itself at the live edge and trims what it has played, because the fetch is read continuously — the proxy drops a listener that stops draining. AirPlay is off on that path, as `ManagedMediaSource` requires without an HLS alternative. Listen stays native everywhere, which is what keeps it playing on a locked screen.
 
 ## Home Assistant automation
 
@@ -30,7 +34,7 @@ Audio targets (Chromecast Audio, an amp) arrive as `/audio` URLs and want `media
 
 ## Testing
 
-`node test/flows.mjs` (Node 22+, no dependencies) drives every UI flow — Stream, Listen, audio mode, Cast to a video and to an audio target, Stop, settings persistence — in a headless Chromium-family browser against a local stub proxy, with the HA webhooks stubbed in-page, so nothing leaves the machine. Set `BROWSER_BIN` to pick the browser (default `thorium-browser`).
+`node test/flows.mjs` (Node 22+, no dependencies) drives every UI flow — Stream, Listen, audio mode, Cast to a video and to an audio target, Stop, settings persistence — in a headless Chromium-family browser against a local stub proxy, with the HA webhooks stubbed in-page, so nothing leaves the machine. It also runs Stream through the Safari path, with `MediaSource` standing in for `ManagedMediaSource` and `test/live.mp4` served the way the proxy serves a late joiner; the checks that need frames decoded are skipped by a browser without H.264, such as open-source Chromium. Set `BROWSER_BIN` to pick the browser (default `thorium-browser`).
 
 ## Deployment
 

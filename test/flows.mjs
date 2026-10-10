@@ -8,6 +8,18 @@
 // /video and /audio. Both send headers and then hold the socket open, so the media
 // element stays in "loading" instead of erroring on a garbage payload. The HA
 // webhooks are stubbed in-page: nothing leaves the machine.
+//
+// The last phase covers Safari's ManagedMediaSource path. Chromium has no
+// ManagedMediaSource, so the page is reloaded with plain MediaSource aliased to that
+// name, and /video then serves test/live.mp4 — eight seconds of fragmented MP4 muxed
+// with the proxy's own movflags, a keyframe opening every one-second fragment — the way
+// the proxy serves a late joiner: init segment, then fragments from mid-stream, so media
+// time starts at 4 s rather than zero. Paced out and held open like a live stream.
+// Regenerate it with:
+//   ffmpeg -f lavfi -i testsrc2=size=320x180:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 \
+//     -t 8 -c:v libx264 -preset veryfast -profile:v main -g 25 -b:v 100k -c:a aac -b:a 48k \
+//     -frag_duration 1000000 -movflags +frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset \
+//     -f mp4 test/live.mp4
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFileSync, existsSync, rmSync } from 'node:fs';
@@ -16,21 +28,52 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'player');
+const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(TEST_DIR, '..', 'player');
+const LIVE_MP4 = lateJoin(readFileSync(join(TEST_DIR, 'live.mp4')), 4);
+
+// ftyp + moov, then the fragments after the first `skip` moof+mdat pairs.
+function lateJoin(buf, skip) {
+  const parts = [];
+  let fragments = 0;
+  for (let at = 0; at < buf.length;) {
+    const size = buf.readUInt32BE(at), type = buf.toString('latin1', at + 4, at + 8);
+    if (type === 'moof') fragments++;
+    if (fragments === 0 || fragments > skip) parts.push(buf.subarray(at, at + size));
+    at += size;
+  }
+  return Buffer.concat(parts);
+}
 const BROWSER_BIN = process.env.BROWSER_BIN || 'thorium-browser';
 
 // ---- stub server: page host + fake proxy ------------------------------------
 
 const hits = [];
 const sockets = new Set();
+let serveMedia = false; // the ManagedMediaSource phase wants real fMP4 on /video
+const videoClosed = []; // /video requests whose client went away
 const stub = createServer((req, res) => {
   if (req.url === '/index.html' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(readFileSync(`${ROOT}/index.html`));
   } else {
     hits.push(req.url);
-    res.writeHead(200, { 'Content-Type': req.url.startsWith('/audio') ? 'audio/aac' : 'video/mp4' });
-    // no body, never end: keeps the media element waiting instead of erroring
+    const isVideo = req.url.startsWith('/video');
+    res.writeHead(200, {
+      'Content-Type': isVideo ? 'video/mp4' : 'audio/aac',
+      'Access-Control-Allow-Origin': '*', // as the proxy sends; the MSE path fetches cross-origin
+    });
+    if (isVideo) req.on('close', () => videoClosed.push(req.url));
+    if (isVideo && serveMedia) {
+      // Paced in small writes so the init segment straddles reads, as it can off a real
+      // socket. Never ended, like a live stream.
+      let at = 0;
+      const tick = setInterval(() => {
+        if (at >= LIVE_MP4.length || res.destroyed) return clearInterval(tick);
+        res.write(LIVE_MP4.subarray(at, at += 7000));
+      }, 20);
+    }
+    // otherwise no body, never end: keeps the media element waiting instead of erroring
   }
 });
 stub.on('connection', s => sockets.add(s));
@@ -205,6 +248,48 @@ check('Reload: inputs + device restored', await evl(`
   idEl.value === ${JSON.stringify(CID)} && hostEl.value === '127.0.0.1:${PORT}' &&
   deviceEl.value === 'living-room-tv'
 `));
+
+// --- Stream through ManagedMediaSource (the Safari path) ---
+// Aliased before the page's script runs, which is when it looks the API up.
+const shim = await send('Page.addScriptToEvaluateOnNewDocument', {
+  source: 'window.ManagedMediaSource = window.MediaSource;',
+});
+serveMedia = true;
+await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/index.html` });
+await sleep(1200);
+hits.length = 0;
+await evl(`document.getElementById('btnPreview').click(); 'ok'`);
+const mmsHit = await waitHit('/video');
+// Open-source Chromium builds have no H.264 decoder. The flow up to the SourceBuffer still
+// runs there; only the checks that need frames decoded are skipped.
+const h264 = await evl(`MediaSource.isTypeSupported('video/mp4; codecs="avc1.4d400c,mp4a.40.2"')`);
+const decodeCheck = h264 ? check : name => console.log(`SKIP  ${name}  (this browser cannot decode H.264)`);
+check('MMS: page fetched /video with the id and nothing else', mmsHit === `/video?id=${CID}`, mmsHit ?? '');
+check('MMS: element plays a blob: URL, not the proxy URL', await evl(`video.src.startsWith('blob:')`), await evl(`video.src`));
+let playing = false;
+for (let i = 0; h264 && i < 25 && !playing; i++) {
+  await sleep(200);
+  playing = await evl(`video.readyState >= 2 && !video.paused && video.currentTime > 4`);
+}
+decodeCheck('MMS: video plays, seeked to the late-joiner start (4 s)', playing,
+  JSON.stringify(await evl(`({ t: video.currentTime, rs: video.readyState, paused: video.paused, err: video.error?.message, status: statusEl.textContent })`)));
+check('MMS: SourceBuffer built from the init segment\'s codecs',
+  await evl(`statusEl.textContent.includes('video/mp4; codecs="avc1.4d400c,mp4a.40.2"')`), await evl(`statusEl.textContent`));
+const t0 = await evl(`video.currentTime`);
+await sleep(1000);
+decodeCheck('MMS: playback advances', await evl(`video.currentTime`) > t0 + 0.5);
+
+// Listen tears the MSE session down — the fetch must go, or the proxy keeps a listener —
+// and plays /audio natively even where ManagedMediaSource exists.
+videoClosed.length = 0;
+hits.length = 0;
+await evl(`document.getElementById('btnListen').click(); 'ok'`);
+await waitHit('/audio');
+await sleep(300);
+decodeCheck('MMS: switching to Listen aborts the /video fetch', videoClosed.length === 1, JSON.stringify(videoClosed));
+check('MMS: Listen still plays /audio natively', await evl(`video.src === ${JSON.stringify(AUDIO_URL)}`), await evl(`video.src`));
+check('MMS: no stale status from the torn-down session', await evl(`statusEl.textContent.startsWith('Listening')`), await evl(`statusEl.textContent`));
+await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: shim.result.identifier });
 
 const realErrors = pageErrors.filter(t => !/MediaError/i.test(t));
 check('No unexpected page exceptions', realErrors.length === 0, JSON.stringify(realErrors));

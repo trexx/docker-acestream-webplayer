@@ -159,18 +159,206 @@
     function audioUrl(id) { return `http://${settings.engineHost()}/audio?id=${id}`; }
 
     // ---- Playback ------------------------------------------------------------
-    // One path for both modes, because the proxy hands the <video> element something it can
-    // play natively either way: fragmented MP4 on /video, ADTS on /audio. No demuxer, no MSE
-    // plumbing — attaching mid-stream is the proxy's problem, and it solves it by replaying
-    // the init segment and starting each new listener on a fragment boundary.
+    // Most browsers play what the proxy sends natively: fragmented MP4 on /video, ADTS on
+    // /audio. Attaching mid-stream is the proxy's problem, and it solves it by replaying the
+    // init segment and starting each new listener on a fragment boundary.
+    //
+    // Safari (iPad, iPhone, Mac) won't play /video that way. Its media stack opens with a
+    // byte-range probe and treats live media as HLS-only, so an endless close-delimited MP4
+    // with no length is rejected outright. It does have ManagedMediaSource, so there the page
+    // fetches /video itself and appends the bytes to a SourceBuffer — the stream is
+    // already MSE-shaped. Audio stays native everywhere: Safari plays an endless ADTS stream
+    // the way it plays internet radio, and native playback is what keeps Listen alive on a
+    // locked screen.
+
+    const ManagedMediaSource = window.ManagedMediaSource;
+
+    // Buffer housekeeping for the MSE path. The fetch is read continuously whatever the
+    // element is doing — the proxy disconnects a listener whose socket stops draining — so
+    // played data is trimmed to keep the SourceBuffer under its quota, and a viewer who has
+    // drifted (a pause, a stall) is moved back to the live edge.
+    const KEEP_BEHIND_S = 30;
+    const MAX_LIVE_LAG_S = 10;
+
+    // The SourceBuffer's MIME type needs the real codecs, which only the init segment knows:
+    // moov > trak > mdia > minf > stbl > stsd > sample entry, one per track.
+    function initCodecs(buf) {
+      const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+      const type = at => String.fromCharCode(buf[at + 4], buf[at + 5], buf[at + 6], buf[at + 7]);
+      const hex = b => b.toString(16).padStart(2, '0');
+      // Children of the box spanning [from, to), each as { type, start, body, end }.
+      function* boxes(from, to) {
+        for (let at = from; at + 8 <= to;) {
+          const size = view.getUint32(at);
+          if (size < 8 || at + size > to) return;
+          yield { type: type(at), start: at, body: at + 8, end: at + size };
+          at += size;
+        }
+      }
+      const child = (box, name, skip = 0) => box && [...boxes(box.body + skip, box.end)].find(b => b.type === name);
+
+      function entryCodec(entry) {
+        switch (entry.type) {
+          case 'avc1': case 'avc3': {
+            const avcC = child(entry, 'avcC', 78); // past the visual sample entry fields
+            return avcC ? `${entry.type}.${hex(buf[avcC.body + 1])}${hex(buf[avcC.body + 2])}${hex(buf[avcC.body + 3])}` : entry.type;
+          }
+          case 'hvc1': case 'hev1': {
+            const hvcC = child(entry, 'hvcC', 78);
+            if (!hvcC) return entry.type;
+            const p = hvcC.body;
+            const space = ['', 'A', 'B', 'C'][buf[p + 1] >> 6];
+            let compat = view.getUint32(p + 2), reversed = 0;
+            for (let i = 0; i < 32; i++, compat >>>= 1) reversed = (reversed << 1) | (compat & 1);
+            const constraints = [...buf.subarray(p + 6, p + 12)];
+            while (constraints.length && constraints[constraints.length - 1] === 0) constraints.pop();
+            return [entry.type, space + (buf[p + 1] & 0x1f), (reversed >>> 0).toString(16),
+              ((buf[p + 1] & 0x20) ? 'H' : 'L') + buf[p + 12], ...constraints.map(c => c.toString(16))].join('.');
+          }
+          case 'mp4a': {
+            // esds: DecoderConfigDescriptor (tag 4) then DecoderSpecificInfo (tag 5), whose
+            // first five bits are the AAC audio object type — 2 for LC, 5 for HE-AAC.
+            const esds = child(entry, 'esds', 28);
+            if (esds) {
+              for (let i = esds.body + 4; i < esds.end - 1; i++) {
+                if (buf[i] !== 5) continue;
+                let j = i + 1;
+                while (j < esds.end && buf[j] & 0x80) j++; // descriptor length, 7 bits a byte
+                if (j + 1 < esds.end) return `mp4a.40.${buf[j + 1] >> 3}`;
+              }
+            }
+            return 'mp4a.40.2';
+          }
+          default:
+            return entry.type;
+        }
+      }
+
+      const moov = [...boxes(0, buf.length)].find(b => b.type === 'moov');
+      const codecs = [...boxes(moov.body, moov.end)].filter(b => b.type === 'trak').map(trak => {
+        const stbl = child(child(child(trak, 'mdia'), 'minf'), 'stbl');
+        const stsd = child(stbl, 'stsd');
+        const sample = stsd && [...boxes(stsd.body + 8, stsd.end)][0]; // past version/flags + count
+        return sample ? entryCodec(sample) : null;
+      }).filter(Boolean);
+      return `video/mp4; codecs="${codecs.join(',')}"`;
+    }
+
+    // Byte length of a complete ftyp + moov at the head of buf, or 0 if it hasn't all arrived.
+    function initLength(buf) {
+      const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+      for (let at = 0; at + 8 <= buf.length;) {
+        const size = view.getUint32(at);
+        const type = String.fromCharCode(...buf.subarray(at + 4, at + 8));
+        if (size < 8) throw new Error(`bad ${type} box in the stream head`);
+        if (at + size > buf.length) return 0;
+        at += size;
+        if (type === 'moov') return at;
+      }
+      return 0;
+    }
+
+    function concat(chunks) {
+      const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+      let at = 0;
+      for (const c of chunks) { out.set(c, at); at += c.length; }
+      return out;
+    }
+
+    // One fetch-into-SourceBuffer session. stop() aborts the fetch, which is what tells the
+    // proxy the listener has gone; everything async checks `stopped` before touching the
+    // element, since a newer session may own it by then.
+    function mmsSession(url) {
+      const abort = new AbortController();
+      const source = new ManagedMediaSource();
+      const objectUrl = URL.createObjectURL(source);
+      let stopped = false;
+
+      async function pump() {
+        await new Promise(r => source.addEventListener('sourceopen', r, { once: true }));
+        const res = await fetch(url, { signal: abort.signal, cache: 'no-store' });
+        if (!res.ok) throw new Error(`proxy answered HTTP ${res.status}`);
+        const reader = res.body.getReader();
+
+        // Hold everything until the init segment is whole: it names the codecs the
+        // SourceBuffer must be created with.
+        let head = [], sb = null;
+        const queue = [];
+        let seeked = false;
+
+        const appendNext = () => {
+          if (stopped || sb.updating || !queue.length) return;
+          const t = video.currentTime, b = sb.buffered;
+          if (b.length && t - b.start(0) > KEEP_BEHIND_S + 10) {
+            sb.remove(0, t - KEEP_BEHIND_S);
+            return;
+          }
+          try {
+            sb.appendBuffer(queue[0]);
+            queue.shift();
+          } catch (e) {
+            if (e.name !== 'QuotaExceededError' || !b.length) throw e;
+            sb.remove(0, Math.max(b.start(0) + 1, t - 5)); // retried on updateend
+          }
+        };
+        const onUpdateEnd = () => {
+          if (stopped) return;
+          const b = video.buffered;
+          if (b.length) {
+            const end = b.end(b.length - 1);
+            // The proxy starts a late joiner mid-encoder, so media time begins wherever the
+            // encoder had got to, not at zero.
+            if (!seeked && b.start(0) > video.currentTime) { video.currentTime = b.start(0); seeked = true; }
+            else if (end - video.currentTime > MAX_LIVE_LAG_S) video.currentTime = end - 1;
+          }
+          try { appendNext(); } catch (e) { stop(); log('Stream error: ' + e.message); }
+        };
+
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (stopped) return;
+          if (done) { log('Stream ended.'); return; }
+          if (sb) { queue.push(value); appendNext(); continue; }
+
+          head.push(value);
+          const buf = concat(head);
+          if (!initLength(buf)) { head = [buf]; continue; }
+          const type = initCodecs(buf);
+          if (!ManagedMediaSource.isTypeSupported(type)) throw new Error(`this browser can't play ${type}`);
+          sb = source.addSourceBuffer(type);
+          sb.addEventListener('updateend', onUpdateEnd);
+          sb.addEventListener('error', () => !stopped && log('SourceBuffer error.'));
+          log(`Streaming: ${url}\n(ManagedMediaSource, ${type})`);
+          queue.push(buf);
+          appendNext();
+        }
+      }
+
+      function stop() {
+        stopped = true;
+        abort.abort();
+        URL.revokeObjectURL(objectUrl);
+      }
+
+      video.disableRemotePlayback = true; // ManagedMediaSource requires it, absent an AirPlay source
+      video.src = objectUrl;
+      pump().catch(e => { if (!stopped) { stop(); log('Stream error: ' + e.message); } });
+
+      return { stop };
+    }
+
+    let session = null;
 
     const playback = {
-      start(url) {
-        video.src = url;
-        video.play().catch(e => log('play() rejected: ' + e.message));
+      start(url, { native = false } = {}) {
+        if (ManagedMediaSource && !native) session = mmsSession(url);
+        else video.src = url;
+        // Called inside the click handler, before any data, so it counts as a user gesture.
+        video.play().catch(e => { if (e.name !== 'AbortError') log('play() rejected: ' + e.message); });
       },
 
       stop() {
+        if (session) { session.stop(); session = null; }
         if (!video.src) return;
         video.pause();
         video.removeAttribute('src');
@@ -271,7 +459,7 @@
       playback.stop();
       // Server-side audio-only — a fraction of the data of the full stream.
       const url = audioUrl(id);
-      playback.start(url);
+      playback.start(url, { native: true });
       enterAudioMode(id);
       log('Listening (audio only): ' + url);
     });
