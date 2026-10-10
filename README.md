@@ -34,7 +34,7 @@ Audio targets (Chromecast Audio, an amp) arrive as `/audio` URLs and want `media
 
 ## Testing
 
-`node test/flows.mjs` (Node 22+, no dependencies) drives every UI flow — Stream, Listen, audio mode, Cast to a video and to an audio target, Stop, id validation, a refused stream, settings persistence, and Open in VLC under an emulated iPad — in a headless Chromium-family browser against a local stub proxy, with the HA webhooks stubbed in-page, so nothing leaves the machine. Set `BROWSER_BIN` to pick the browser (default `thorium-browser`).
+`node test/flows.mjs` (Node 22+, no dependencies) drives every UI flow — Stream, Listen, audio mode, Cast to a video and to an audio target, Stop, id validation, a refused stream, settings persistence, the screen wake lock, and Open in VLC under an emulated iPad — in a headless Chromium-family browser against a local stub proxy, with the HA webhooks stubbed in-page, so nothing leaves the machine. Set `BROWSER_BIN` to pick the browser (default `thorium-browser`).
 
 The same script runs in CI on every push and pull request (`BROWSER_BIN=google-chrome` on the GitHub runner), and a tag only builds an image once it has passed.
 
