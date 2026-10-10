@@ -206,6 +206,33 @@ check('Reload: inputs + device restored', await evl(`
   deviceEl.value === 'living-room-tv'
 `));
 
+// --- Open in VLC: offered only on iPhone/iPad ---
+check('VLC: button hidden on a desktop browser', await evl(`document.getElementById('btnVlc').hidden`));
+
+// An iPad asking for the desktop site: a Mac user agent with touch points.
+await send('Emulation.setUserAgentOverride', {
+  userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15',
+});
+await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/index.html` });
+await sleep(1200);
+check('VLC: button shown on an iPad', await evl(`!document.getElementById('btnVlc').hidden`));
+const PAGE_URL = `http://127.0.0.1:${PORT}/index.html`;
+check('VLC: x-callback URL carries the encoded /video URL and a way back',
+  await evl(`vlcUrl(${JSON.stringify(CID)})`) === 'vlc-x-callback://x-callback-url/stream'
+    + `?url=${encodeURIComponent(VIDEO_URL)}&x-success=${encodeURIComponent(PAGE_URL)}`,
+  await evl(`vlcUrl(${JSON.stringify(CID)})`));
+
+// Hand-off stops in-page playback first, so the iPad doesn't pull the stream twice. The
+// browser has no handler for the scheme, so the page stays put.
+await evl(`document.getElementById('btnPreview').click(); 'ok'`);
+await waitHit('/video');
+await evl(`document.getElementById('btnVlc').click(); 'ok'`);
+await sleep(500);
+check('VLC: in-page playback stopped', await evl(`!video.getAttribute('src')`), await evl(`video.src`));
+check('VLC: status says where the stream went', await evl(`statusEl.textContent.startsWith(${JSON.stringify('Opening in VLC: ' + VIDEO_URL)})`), await evl(`statusEl.textContent`));
+await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+
 const realErrors = pageErrors.filter(t => !/MediaError/i.test(t));
 check('No unexpected page exceptions', realErrors.length === 0, JSON.stringify(realErrors));
 
