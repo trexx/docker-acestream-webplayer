@@ -4,33 +4,12 @@
   "extends": [
     "docker:enableMajor",
     "docker:pinDigests",
+    "helpers:pinGitHubActionDigests",
     "default:automergeDigest",
     "default:automergeMinor"
   ],
   "enabledManagers": [
     "dockerfile",
-    "custom.regex"
-  ],
-  "packageRules": [
-    {
-      "enabled": false,
-      "matchDepTypes":[
-        "stage"
-      ]
-    },
-    {
-      "matchPackagePatterns": ["^python$"],
-      "allowedVersions": "3.10"
-    }
-  ],
-  "customManagers": [
-    {
-      "customType": "regex",
-      "fileMatch": ["^Dockerfile$"],
-      "matchStrings": [
-        "#\\s*renovate:\\s*datasource=(?<datasource>.*?) depName=(?<depName>.*?)( versioning=(?<versioning>.*?))?\\sENV .*?_VERSION=\"(?<currentValue>.*)\"\\s"
-      ],
-      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}"
-    }
+    "github-actions"
   ]
 }

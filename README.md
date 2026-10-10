@@ -8,7 +8,7 @@ With some basic UI elements to make the above a little easier.
 
 ## Everything goes through the proxy
 
-No button talks to the AceStream engine directly. All three fetch from [rust-acestream-proxy](https://github.com/trexx/rust-acestream-proxy), path-routed on the engine host (the ingress sends `/video` and `/audio` to the proxy):
+No button talks to the AceStream engine directly. All three fetch from [rust-acestream-proxy](https://github.com/trexx/rust-acestream-proxy), path-routed on the proxy host set under Settings (the ingress sends `/video` and `/audio` to the proxy):
 
 | Button | URL | What comes back |
 | --- | --- | --- |
@@ -19,6 +19,8 @@ No button talks to the AceStream engine directly. All three fetch from [rust-ace
 On iPhone and iPad an **Open in VLC** button appears next to Listen. Safari can't play `/video`: its media stack opens with a byte-range probe and takes live media only as HLS, so an endless MP4 is refused. [VLC for iOS](https://apps.apple.com/app/vlc-media-player/id650377962) plays it with its own demuxer, so the button stops any in-page playback and hands it the same `/video` URL through VLC's `vlc-x-callback://x-callback-url/stream` scheme, with `x-success` pointing back at the page. It is an ordinary proxy listener, so it shares the engine pull with everything else.
 
 The proxy holds one engine session per content id and fans it out, which is why no `pid` appears anywhere any more. A browser preview, a TV and a phone on the same stream now cost the engine one pull between them and cannot knock each other off — the job a distinct player id per client used to do.
+
+The page applies the proxy's own rule to the id before sending anything: exactly 40 hex characters. Anything else is refused with a message, because the proxy's `400` would otherwise surface only as an opaque media error.
 
 ## Home Assistant automation
 
@@ -32,7 +34,9 @@ Audio targets (Chromecast Audio, an amp) arrive as `/audio` URLs and want `media
 
 ## Testing
 
-`node test/flows.mjs` (Node 22+, no dependencies) drives every UI flow — Stream, Listen, audio mode, Cast to a video and to an audio target, Stop, settings persistence, and Open in VLC under an emulated iPad — in a headless Chromium-family browser against a local stub proxy, with the HA webhooks stubbed in-page, so nothing leaves the machine. Set `BROWSER_BIN` to pick the browser (default `thorium-browser`).
+`node test/flows.mjs` (Node 22+, no dependencies) drives every UI flow — Stream, Listen, audio mode, Cast to a video and to an audio target, Stop, id validation, a refused stream, settings persistence, and Open in VLC under an emulated iPad — in a headless Chromium-family browser against a local stub proxy, with the HA webhooks stubbed in-page, so nothing leaves the machine. Set `BROWSER_BIN` to pick the browser (default `thorium-browser`).
+
+The same script runs in CI on every push and pull request (`BROWSER_BIN=google-chrome` on the GitHub runner), and a tag only builds an image once it has passed.
 
 ## Deployment
 
@@ -52,5 +56,5 @@ spec:
   volumes:
     - name: www
       image:
-        reference: ghcr.io/trexx/docker-acestream-webplayer:2.0.0
+        reference: ghcr.io/trexx/docker-acestream-webplayer:7.0.0
 ```
