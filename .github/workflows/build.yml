@@ -12,7 +12,7 @@ jobs:
 
   build:
     needs: 'test'
-    uses: 'trexx/actions/.github/workflows/build.yml@main'
+    uses: 'trexx/actions/.github/workflows/build.yml@93169aa11d877f535918a3f6cd3352e71adbc4c2' # main
     secrets: 'inherit'
     permissions:
       contents: read
