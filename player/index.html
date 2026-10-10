@@ -41,8 +41,8 @@
   <details class="settings">
     <summary>Settings</summary>
     <div class="row">
-      <label for="engineHost">Engine host</label>
-      <input id="engineHost" type="text" placeholder="acestream.apps.pixelman.me">
+      <label for="engineHost">Proxy host</label>
+      <input id="engineHost" type="text">
     </div>
     <div class="row">
       <label for="keepScreenOn">Keep screen on</label>
@@ -73,7 +73,7 @@
   </div>
 
   <div class="label">Status</div>
-  <pre id="status">Ready.</pre>
+  <pre id="status" aria-live="polite">Ready.</pre>
 
   <script>
     // ---- Config ------------------------------------------------------------
@@ -117,8 +117,10 @@
 
     // ---- Settings (all localStorage access lives here) ----------------------
     // Text inputs persist when their value is used (a button click), not per
-    // keystroke. A cleared AceStream ID or engine host keeps the previously
-    // saved value on reload.
+    // keystroke. A cleared or rejected AceStream ID, or a cleared proxy host,
+    // keeps the previously saved value on reload. The host is stored under the
+    // key 'engineHost' from when the page talked to the engine directly; the
+    // key is kept so nobody loses a saved setting over a rename.
 
     const settings = {
       load() {
@@ -128,13 +130,17 @@
         const device = localStorage.getItem('castDevice');
         if (device && CAST_DEVICES.some(d => d.name === device)) deviceEl.value = device;
       },
+      // Logs and returns null when there is nothing usable. The format check
+      // mirrors the proxy's own (a 40-char hex content id): anything else would
+      // come back as a 400 that the <video> element can only report as "code 4".
       id() {
         const id = idEl.value.trim();
-        if (!id) return null;
+        if (!id) { log('Enter an AceStream ID first.'); return null; }
+        if (!/^[0-9a-f]{40}$/i.test(id)) { log('AceStream ID must be 40 hex characters.'); return null; }
         localStorage.setItem('acestreamId', id);
         return id;
       },
-      engineHost() {
+      proxyHost() {
         const host = hostEl.value.trim();
         if (host) {
           localStorage.setItem('engineHost', host);
@@ -155,8 +161,8 @@
     // Plain http throughout, cast targets included: the page is served over http and a Cast
     // receiver plays an http media URL happily, so there is no reason for the two to differ.
 
-    function videoUrl(id) { return `http://${settings.engineHost()}/video?id=${id}`; }
-    function audioUrl(id) { return `http://${settings.engineHost()}/audio?id=${id}`; }
+    function videoUrl(id) { return `http://${settings.proxyHost()}/video?id=${id}`; }
+    function audioUrl(id) { return `http://${settings.proxyHost()}/audio?id=${id}`; }
 
     // ---- Playback ------------------------------------------------------------
     // One path for both modes, because the proxy hands the <video> element something it can
@@ -164,10 +170,18 @@
     // plumbing — attaching mid-stream is the proxy's problem, and it solves it by replaying
     // the init segment and starting each new listener on a fragment boundary.
 
+    // play() returns a promise that rejects on autoplay policy or a dead source;
+    // every caller wants the same thing done with that, so it lives here once.
+    // A dead source has already been reported by the 'error' handler with the
+    // element's own reason, so that rejection is not reported a second time.
+    function safePlay() {
+      video.play().catch(e => { if (!video.error) log('play() rejected: ' + e.message); });
+    }
+
     const playback = {
       start(url) {
         video.src = url;
-        video.play().catch(e => log('play() rejected: ' + e.message));
+        safePlay();
       },
 
       stop() {
@@ -189,7 +203,7 @@
       npTitle.textContent = label;
       if (!('mediaSession' in navigator)) return;
       navigator.mediaSession.metadata = new MediaMetadata({ title: label, artist: 'AceStream' });
-      navigator.mediaSession.setActionHandler('play', () => video.play());
+      navigator.mediaSession.setActionHandler('play', safePlay);
       navigator.mediaSession.setActionHandler('pause', () => video.pause());
       navigator.mediaSession.setActionHandler('stop', () => {
         playback.stop();
@@ -201,7 +215,10 @@
     function exitAudioMode() {
       document.body.classList.remove('audio-mode');
       audioPanel.hidden = true;
-      if ('mediaSession' in navigator) navigator.mediaSession.metadata = null;
+      if (!('mediaSession' in navigator)) return;
+      navigator.mediaSession.metadata = null;
+      // Otherwise a lock-screen "stop" keeps working on the video that replaced the audio.
+      for (const action of ['play', 'pause', 'stop']) navigator.mediaSession.setActionHandler(action, null);
     }
 
     // ---- Wake lock -------------------------------------------------------------
@@ -231,9 +248,11 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        // Without this a hung HA leaves "Casting … via HA…" on screen for good.
+        signal: AbortSignal.timeout(10000),
       })
         .then(r => log(r.ok ? `${kind} request accepted (${body.device}).` : `${kind} request failed: HTTP ${r.status}.`))
-        .catch(e => log(`${kind} request error: ` + e.message));
+        .catch(e => log(`${kind} request error: ` + (e.name === 'TimeoutError' ? 'HA did not answer within 10s.' : e.message)));
     }
 
     // The page picks the endpoint and hands HA a finished URL, so the automation only has to
@@ -253,11 +272,12 @@
       opt.textContent = name;
       deviceEl.appendChild(opt);
     }
+    hostEl.placeholder = DEFAULT_HOST;
     settings.load(); // after the <select> has its options, so the saved device applies
 
     document.getElementById('btnPreview').addEventListener('click', () => {
       const id = settings.id();
-      if (!id) { log('Enter an AceStream ID first.'); return; }
+      if (!id) return;
       playback.stop();
       exitAudioMode();
       const url = videoUrl(id);
@@ -267,7 +287,7 @@
 
     document.getElementById('btnListen').addEventListener('click', () => {
       const id = settings.id();
-      if (!id) { log('Enter an AceStream ID first.'); return; }
+      if (!id) return;
       playback.stop();
       // Server-side audio-only — a fraction of the data of the full stream.
       const url = audioUrl(id);
@@ -278,7 +298,7 @@
 
     document.getElementById('btnCast').addEventListener('click', () => {
       const id = settings.id();
-      if (!id) { log('Enter an AceStream ID first.'); return; }
+      if (!id) return;
       const device = CAST_DEVICES.find(d => d.name === deviceEl.value);
       if (!device) { log('Pick a cast device first.'); return; }
       cast(id, device);
@@ -289,7 +309,7 @@
       haRequest('Stop', HA_STOP_WEBHOOK, { device: deviceEl.value });
     });
 
-    btnAudioToggle.addEventListener('click', () => video.paused ? video.play() : video.pause());
+    btnAudioToggle.addEventListener('click', () => video.paused ? safePlay() : video.pause());
     document.getElementById('btnExitAudio').addEventListener('click', exitAudioMode);
 
     video.addEventListener('play', () => {
@@ -301,7 +321,13 @@
       if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
     });
     video.addEventListener('error', () => {
-      if (video.error) log('Media error: ' + (video.error.message || 'code ' + video.error.code));
+      if (!video.error) return;
+      const detail = video.error.message || 'code ' + video.error.code;
+      // A proxy 400/502 arrives here as "source not supported": the element cannot
+      // show the response body, so the proxy's reason is only in the proxy's log.
+      log(video.error.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+        ? `Stream refused or not playable (${detail}). Check the id and proxy host; the proxy log has the reason.`
+        : 'Media error: ' + detail);
     });
 
     wakeEl.addEventListener('change', () => {
