@@ -19,7 +19,7 @@
     button.primary:hover { background: #2280f0; }
     button.danger { background: #7a1a1a; border-color: #a02020; }
     button.danger:hover { background: #a02020; }
-    #castDevice { background: #222; border: 1px solid #444; color: #eee; padding: 0.4rem 0.6rem; border-radius: 4px; font-size: 0.9rem; }
+    select { background: #222; border: 1px solid #444; color: #eee; padding: 0.4rem 0.6rem; border-radius: 4px; font-size: 0.9rem; }
     video { width: 100%; max-width: 900px; background: #000; border-radius: 4px; display: block; margin-bottom: 1rem; }
     pre { background: #1a1a1a; border: 1px solid #333; border-radius: 4px; padding: 0.75rem; font-size: 0.8rem; color: #9cf; white-space: pre-wrap; word-break: break-all; min-height: 2.5rem; max-height: 8rem; overflow-y: auto; }
     .label { font-size: 0.75rem; color: #888; margin-bottom: 0.25rem; }
@@ -41,7 +41,11 @@
   <details class="settings">
     <summary>Settings</summary>
     <div class="row">
-      <label for="engineHost">Proxy host</label>
+      <label for="backend">Backend</label>
+      <select id="backend"></select>
+    </div>
+    <div class="row">
+      <label for="engineHost">Host</label>
       <input id="engineHost" type="text">
     </div>
     <div class="row">
@@ -79,12 +83,39 @@
   <script>
     // ---- Config ------------------------------------------------------------
 
-    // Every stream comes from rust-acestream-proxy (github.com/trexx/rust-acestream-proxy),
-    // path-routed on this host: /video is fragmented MP4 with the video track stream-copied,
-    // /audio is audio only. The proxy pulls each content id from the engine once and fans it
-    // out, so a browser preview, a TV and a car radio on the same id cost one engine session
-    // between them.
-    const DEFAULT_HOST = 'acestream.apps.pixelman.me';
+    // Every stream comes from one of two backends, picked under Settings. Both serve the same
+    // two things: fragmented MP4 with the video track stream-copied, and audio only. Both pull
+    // each content id once and fan it out, so a browser preview, a TV and a car radio on the
+    // same id cost one engine session between them. Only the paths differ.
+    //
+    // - proxy: rust-acestream-proxy (github.com/trexx/rust-acestream-proxy) in front of an
+    //   AceStream engine, path-routed on its host (/video, /audio).
+    // - engine: go-acestream-engine (github.com/trexx/go-acestream-engine), which packages the
+    //   output itself on its native /streams routes, so there is no proxy in front of it.
+    //
+    // Each backend keeps its own saved host (hostKey), so switching is one change in Settings
+    // and switching back restores the host that was in use. The proxy's key is 'engineHost',
+    // from when the page talked to the engine directly; it is kept so nobody loses a saved
+    // setting over a rename.
+    const BACKENDS = {
+      proxy: {
+        label: 'rust-acestream-proxy',
+        defaultHost: 'acestream.example.com',
+        hostKey: 'engineHost',
+        video: id => `/video?id=${id}`,
+        audio: id => `/audio?id=${id}`,
+        logName: 'proxy log',
+      },
+      engine: {
+        label: 'go-acestream-engine',
+        defaultHost: 'acestream-v2.example.com',
+        hostKey: 'goEngineHost',
+        video: id => `/streams/content/${id}/video.mp4`,
+        audio: id => `/streams/content/${id}/audio.aac`,
+        logName: 'engine log',
+      },
+    };
+    const DEFAULT_BACKEND = 'proxy';
 
     // Casting goes through Home Assistant: the page POSTs the stream URL to a webhook, an HA
     // automation calls media_player.play_media on the chosen device. Works the same on desktop
@@ -105,6 +136,7 @@
     const statusEl = document.getElementById('status');
     const idEl = document.getElementById('acestreamId');
     const hostEl = document.getElementById('engineHost');
+    const backendEl = document.getElementById('backend');
     const wakeEl = document.getElementById('keepScreenOn');
     const deviceEl = document.getElementById('castDevice');
     const audioPanel = document.getElementById('audioPanel');
@@ -119,32 +151,43 @@
     // ---- Settings (all localStorage access lives here) ----------------------
     // Text inputs persist when their value is used (a button click), not per
     // keystroke: target() is called once per click and saves both, so nothing
-    // else here writes. A cleared or rejected AceStream ID, or a cleared proxy
-    // host, keeps the previously saved value on reload. The host is stored under the
-    // key 'engineHost' from when the page talked to the engine directly; the
-    // key is kept so nobody loses a saved setting over a rename.
+    // else here writes them. A cleared or rejected AceStream ID, or a cleared
+    // host, keeps the previously saved value on reload. The host is saved under
+    // the selected backend's key (see BACKENDS).
+
+    const backend = () => BACKENDS[backendEl.value];
 
     const settings = {
       load() {
         idEl.value = localStorage.getItem('acestreamId') || '';
-        hostEl.value = localStorage.getItem('engineHost') || '';
         wakeEl.checked = localStorage.getItem('keepScreenOn') === 'true';
         const device = localStorage.getItem('castDevice');
         if (device && CAST_DEVICES.some(d => d.name === device)) deviceEl.value = device;
+        const saved = localStorage.getItem('backend');
+        backendEl.value = saved in BACKENDS ? saved : DEFAULT_BACKEND;
+        this.loadHost();
       },
-      // What a button acts on: { id, host }, or null (having logged why) when
-      // there is no usable id. The format check mirrors the proxy's own (a 40-char
-      // hex content id): anything else would come back as a 400 that the <video>
-      // element can only report as "code 4".
+      // The host field shows the selected backend's saved host, and its default as the
+      // placeholder; run on load and whenever the backend changes.
+      loadHost() {
+        hostEl.value = localStorage.getItem(backend().hostKey) || '';
+        hostEl.placeholder = backend().defaultHost;
+      },
+      // What a button acts on: { id, host, backend }, or null (having logged why)
+      // when there is no usable id. The format check mirrors both backends' own (a
+      // 40-char hex content id): anything else would come back as a 400 that the
+      // <video> element can only report as "code 4".
       target() {
         const id = idEl.value.trim();
         if (!id) { log('Enter an AceStream ID first.'); return null; }
         if (!/^[0-9a-f]{40}$/i.test(id)) { log('AceStream ID must be 40 hex characters.'); return null; }
         localStorage.setItem('acestreamId', id);
+        const b = backend();
         const host = hostEl.value.trim();
-        if (host) localStorage.setItem('engineHost', host);
-        return { id, host: host || DEFAULT_HOST };
+        if (host) localStorage.setItem(b.hostKey, host);
+        return { id, host: host || b.defaultHost, backend: b };
       },
+      saveBackend() { localStorage.setItem('backend', backendEl.value); },
       saveKeepScreenOn() { localStorage.setItem('keepScreenOn', wakeEl.checked); },
       saveCastDevice() { localStorage.setItem('castDevice', deviceEl.value); },
     };
@@ -152,20 +195,20 @@
     // ---- Stream URLs ---------------------------------------------------------
     // Both endpoints take nothing but the content id. The engine's player id (pid), which
     // used to be generated here so a cast wouldn't knock out an in-browser preview, is now
-    // the proxy's business: it holds one engine session per id and fans it out to every
-    // listener, so there is nothing left for two viewers to collide over.
+    // the backend's business: either one holds one engine session per id and fans it out to
+    // every listener, so there is nothing left for two viewers to collide over.
     //
     // Plain http throughout, cast targets included: the page is served over http and a Cast
     // receiver plays an http media URL happily, so there is no reason for the two to differ.
 
-    function videoUrl({ id, host }) { return `http://${host}/video?id=${id}`; }
-    function audioUrl({ id, host }) { return `http://${host}/audio?id=${id}`; }
+    function videoUrl({ id, host, backend }) { return `http://${host}${backend.video(id)}`; }
+    function audioUrl({ id, host, backend }) { return `http://${host}${backend.audio(id)}`; }
 
     // ---- VLC (iPhone, iPad) --------------------------------------------------
-    // Safari won't play /video: its media stack opens with a byte-range probe and takes live
+    // Safari won't play the video stream: its media stack opens with a byte-range probe and takes live
     // media only as HLS, so an endless MP4 with no length is refused. VLC for iOS has its own
     // demuxer and plays it as is, so on Apple touch devices the page offers to hand the
-    // stream over. It is still the proxy's /video, so it shares the one engine pull.
+    // stream over. It is still the backend's video stream, so it shares the one engine pull.
     // x-success brings the user back here when playback ends.
     //
     // An iPad asks for the desktop site and calls itself a Mac, so it is told apart by its
@@ -179,10 +222,10 @@
     }
 
     // ---- Playback ------------------------------------------------------------
-    // One path for both modes, because the proxy hands the <video> element something it can
-    // play natively either way: fragmented MP4 on /video, ADTS on /audio. No demuxer, no MSE
-    // plumbing — attaching mid-stream is the proxy's problem, and it solves it by replaying
-    // the init segment and starting each new listener on a fragment boundary.
+    // One path for both modes, because either backend hands the <video> element something it
+    // can play natively: fragmented MP4 for video, ADTS for audio. No demuxer, no MSE
+    // plumbing — attaching mid-stream is the backend's problem, and both solve it by replaying
+    // the init segment and starting each new listener on a keyframe fragment.
 
     // play() returns a promise that rejects on autoplay policy or a dead source;
     // every caller wants the same thing done with that, so it lives here once.
@@ -204,7 +247,7 @@
         if (!video.src) return;
         video.pause();
         video.removeAttribute('src');
-        video.load(); // drops the buffered stream and closes the connection to the proxy
+        video.load(); // drops the buffered stream and closes the connection to the backend
       },
     };
 
@@ -280,7 +323,7 @@
     }
 
     // The page picks the endpoint and hands HA a finished URL, so the automation only has to
-    // call play_media with it — it needs to know nothing about the proxy or which targets are
+    // call play_media with it — it needs to know nothing about the backend or which targets are
     // audio-only.
     function cast(target, device) {
       const url = device.audio ? audioUrl(target) : videoUrl(target);
@@ -296,8 +339,13 @@
       opt.textContent = name;
       deviceEl.appendChild(opt);
     }
-    hostEl.placeholder = DEFAULT_HOST;
-    settings.load(); // after the <select> has its options, so the saved device applies
+    for (const [key, { label }] of Object.entries(BACKENDS)) {
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = label;
+      backendEl.appendChild(opt);
+    }
+    settings.load(); // after the <select>s have their options, so the saved values apply
 
     document.getElementById('btnPreview').addEventListener('click', () => {
       const target = settings.target();
@@ -359,16 +407,16 @@
     video.addEventListener('error', () => {
       if (!video.error) return;
       const detail = video.error.message || 'code ' + video.error.code;
-      // Safari refuses /video whatever the proxy says, so there the way out is VLC, not the
-      // proxy log.
+      // Safari refuses the video stream whatever the backend says, so there the way out is
+      // VLC, not the backend's log.
       if (IS_IOS && !document.body.classList.contains('audio-mode')) {
         log(`Safari cannot play this stream (${detail}); try Open in VLC.`);
         return;
       }
-      // A proxy 400/502 arrives here as "source not supported": the element cannot
-      // show the response body, so the proxy's reason is only in the proxy's log.
+      // A backend 400/502 arrives here as "source not supported": the element cannot
+      // show the response body, so the backend's reason is only in its log.
       log(video.error.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
-        ? `Stream refused or not playable (${detail}). Check the id and proxy host; the proxy log has the reason.`
+        ? `Stream refused or not playable (${detail}). Check the id, backend and host; the ${backend().logName} has the reason.`
         : 'Media error: ' + detail);
     });
 
@@ -380,6 +428,10 @@
     document.addEventListener('visibilitychange', applyWakeLock);
 
     deviceEl.addEventListener('change', () => settings.saveCastDevice());
+    backendEl.addEventListener('change', () => {
+      settings.saveBackend();
+      settings.loadHost();
+    });
 
     applyWakeLock();
   </script>
