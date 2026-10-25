@@ -100,7 +100,7 @@
     const BACKENDS = {
       proxy: {
         label: 'rust-acestream-proxy',
-        defaultHost: 'acestream.apps.pixelman.me',
+        defaultHost: 'acestream.example.com',
         hostKey: 'engineHost',
         video: id => `/video?id=${id}`,
         audio: id => `/audio?id=${id}`,
@@ -108,7 +108,7 @@
       },
       engine: {
         label: 'go-acestream-engine',
-        defaultHost: 'acestream-v2.apps.pixelman.me',
+        defaultHost: 'acestream-v2.example.com',
         hostKey: 'goEngineHost',
         video: id => `/streams/content/${id}/video.mp4`,
         audio: id => `/streams/content/${id}/audio.aac`,

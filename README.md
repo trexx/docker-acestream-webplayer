@@ -12,8 +12,10 @@ No button talks to a stock AceStream engine directly. Every stream comes from on
 
 | Backend | Default host | Stream / Cast to a TV | Listen / Cast to an audio target |
 | --- | --- | --- | --- |
-| [rust-acestream-proxy](https://github.com/trexx/rust-acestream-proxy) (default) | `acestream.apps.pixelman.me` | `http://<host>/video?id=…` | `http://<host>/audio?id=…` |
-| [go-acestream-engine](https://github.com/trexx/go-acestream-engine) | `acestream-v2.apps.pixelman.me` | `http://<host>/streams/content/…/video.mp4` | `http://<host>/streams/content/…/audio.aac` |
+| [rust-acestream-proxy](https://github.com/trexx/rust-acestream-proxy) (default) | `acestream.example.com` | `http://<host>/video?id=…` | `http://<host>/audio?id=…` |
+| [go-acestream-engine](https://github.com/trexx/go-acestream-engine) | `acestream-v2.example.com` | `http://<host>/streams/content/…/video.mp4` | `http://<host>/streams/content/…/audio.aac` |
+
+The default hosts are placeholders. Type your own under Settings → Host, or set `defaultHost` in `BACKENDS` (`player/index.html`) before building the image so nobody has to type it.
 
 Both serve the same two things. The video stream is fragmented MP4 with the video track stream-copied and AAC audio, which `<video>` plays natively, so the page ships no player library. The audio stream is ADTS AAC, with the video stripped server-side. The proxy does the packaging in front of a stock engine, path-routed on its host (the ingress sends `/video` and `/audio` to the proxy). go-acestream-engine does it in-engine on its native `/streams` routes, so no proxy sits in front of it. Cast picks per device: entries marked `audio: true` in `CAST_DEVICES` get the audio URL, the rest get video.
 
@@ -30,7 +32,7 @@ The page applies the backends' own rule to the id before sending anything: exact
 The cast webhook payload is a finished URL, so the automation only has to hand it to `media_player.play_media`:
 
 ```json
-{ "url": "http://acestream.apps.pixelman.me/video?id=…", "device": "basement-tv" }
+{ "url": "http://acestream.example.com/video?id=…", "device": "basement-tv" }
 ```
 
 On go-acestream-engine the same payload carries `http://<host>/streams/content/…/video.mp4`. Audio targets (Chromecast Audio, an amp) arrive as audio URLs (`/audio`, or `…/audio.aac` on the engine) and want `media_content_type: "music"`. The stop webhook payload is unchanged: `{ "device": "…" }`.
