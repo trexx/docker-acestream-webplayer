@@ -4,11 +4,13 @@
 // BROWSER_BIN (default: thorium-browser; CI uses the runner's google-chrome).
 //
 // The stub server plays two roles: static host for the page (a media element on a
-// file:// page cannot load from 127.0.0.1) and fake rust-acestream-proxy, answering
-// /video and /audio. Both send headers and then hold the socket open, so the media
-// element stays in "loading" instead of erroring on a garbage payload — except for
-// ERR_CID, which is answered 400 the way the real proxy refuses a stream, to exercise
-// the media error path. The HA webhooks are stubbed in-page: nothing leaves the machine.
+// file:// page cannot load from 127.0.0.1) and fake backend, answering both
+// rust-acestream-proxy's /video and /audio and go-acestream-engine's
+// /streams/content/<id>/video.mp4 and audio.aac. Each sends headers and then holds the
+// socket open, so the media element stays in "loading" instead of erroring on a garbage
+// payload — except for ERR_CID, which is answered 400 the way either backend refuses a
+// stream, to exercise the media error path. The HA webhooks are stubbed in-page: nothing
+// leaves the machine.
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFileSync, existsSync, rmSync } from 'node:fs';
@@ -23,7 +25,7 @@ const BROWSER_BIN = process.env.BROWSER_BIN || 'thorium-browser';
 const CID = 'ab'.repeat(20);
 const ERR_CID = 'ee'.repeat(20);
 
-// ---- stub server: page host + fake proxy ------------------------------------
+// ---- stub server: page host + fake backend ----------------------------------
 
 const hits = [];
 const sockets = new Set();
@@ -38,7 +40,7 @@ const stub = createServer((req, res) => {
       res.end('could not start stream: engine error: unknown content id\n');
       return;
     }
-    res.writeHead(200, { 'Content-Type': req.url.startsWith('/audio') ? 'audio/aac' : 'video/mp4' });
+    res.writeHead(200, { 'Content-Type': /\/audio[.?]/.test(req.url) ? 'audio/aac' : 'video/mp4' });
     // no body, never end: keeps the media element waiting instead of erroring
   }
 });
@@ -159,63 +161,118 @@ await evl(`
   'ready';
 `);
 
-const VIDEO_URL = `http://127.0.0.1:${PORT}/video?id=${CID}`;
-const AUDIO_URL = `http://127.0.0.1:${PORT}/audio?id=${CID}`;
+const PAGE_URL = `http://127.0.0.1:${PORT}/index.html`;
+// What each backend is asked for: the request path the stub sees, and the full URL the page
+// builds from it.
+const PATHS = {
+  proxy: { video: `/video?id=${CID}`, audio: `/audio?id=${CID}` },
+  engine: { video: `/streams/content/${CID}/video.mp4`, audio: `/streams/content/${CID}/audio.aac` },
+};
+const urls = backend => ({
+  video: `http://127.0.0.1:${PORT}${PATHS[backend].video}`,
+  audio: `http://127.0.0.1:${PORT}${PATHS[backend].audio}`,
+});
+const VIDEO_URL = urls('proxy').video;
 
-// --- Stream ---
-await click('btnPreview');
-check('Stream: status shows the proxy /video URL', await evl(`statusEl.textContent === ${JSON.stringify('Streaming: ' + VIDEO_URL)}`), await evl(`statusEl.textContent`));
-const videoHit = await waitHit('/video');
-check('Stream: proxy got the video request', !!videoHit);
-check('Stream: request carries the id and nothing else (no pid)', videoHit === `/video?id=${CID}`, videoHit ?? '');
-check('Stream: element src points at the proxy', await evl(`video.src === ${JSON.stringify(VIDEO_URL)}`));
-check('Stream: not in audio mode', await evl(`!document.body.classList.contains('audio-mode')`));
+check('Backend: the proxy is the default', await evl(`backendEl.value === 'proxy'`), await evl(`backendEl.value`));
 
-// --- Listen ---
-hits.length = 0;
-await click('btnListen');
-const audioHit = await waitHit('/audio');
-check('Listen: proxy got the audio request', !!audioHit);
-check('Listen: audio request carries the id', audioHit === `/audio?id=${CID}`, audioHit ?? '');
-check('Listen: element src swapped to /audio', await evl(`video.src === ${JSON.stringify(AUDIO_URL)}`));
-check('Listen: audio mode on, panel shown', await evl(`document.body.classList.contains('audio-mode') && !audioPanel.hidden`));
-check('Listen: now-playing title is the id', await evl(`npTitle.textContent === ${JSON.stringify(CID)}`));
+// Stream, Listen, Show video, Stream again, Cast to a video and an audio target, Stop: the
+// same flows against whichever backend is selected. Leaves the cast device on 'amp'.
+async function streamFlows(backend) {
+  const P = PATHS[backend], U = urls(backend), tag = `[${backend}]`;
+  await evl(`window.__haCalls = []; deviceEl.value = 'basement-tv'; deviceEl.dispatchEvent(new Event('change')); 'ok'`);
 
-// --- Show video (exit audio mode) ---
-await click('btnExitAudio');
-check('Exit audio: class removed, panel hidden', await evl(`!document.body.classList.contains('audio-mode') && audioPanel.hidden`));
-check('Exit audio: media session metadata cleared', await evl(`!('mediaSession' in navigator) || navigator.mediaSession.metadata === null`));
+  // --- Stream ---
+  hits.length = 0;
+  await click('btnPreview');
+  check(`${tag} Stream: status shows the video URL`, await evl(`statusEl.textContent === ${JSON.stringify('Streaming: ' + U.video)}`), await evl(`statusEl.textContent`));
+  const videoHit = await waitHit(P.video);
+  check(`${tag} Stream: backend got the video request`, !!videoHit);
+  check(`${tag} Stream: request carries the id and nothing else (no pid)`, videoHit === P.video, videoHit ?? '');
+  check(`${tag} Stream: element src points at the backend`, await evl(`video.src === ${JSON.stringify(U.video)}`));
+  check(`${tag} Stream: not in audio mode`, await evl(`!document.body.classList.contains('audio-mode')`));
 
-// --- Stream again while the audio stream is active (teardown branch) ---
-hits.length = 0;
-await click('btnPreview');
-check('Restream: src swapped back to /video', await evl(`video.src === ${JSON.stringify(VIDEO_URL)}`));
-check('Restream: proxy hit again', !!(await waitHit('/video')));
+  // --- Listen ---
+  hits.length = 0;
+  await click('btnListen');
+  const audioHit = await waitHit(P.audio);
+  check(`${tag} Listen: backend got the audio request`, !!audioHit);
+  check(`${tag} Listen: audio request carries the id`, audioHit === P.audio, audioHit ?? '');
+  check(`${tag} Listen: element src swapped to audio`, await evl(`video.src === ${JSON.stringify(U.audio)}`));
+  check(`${tag} Listen: audio mode on, panel shown`, await evl(`document.body.classList.contains('audio-mode') && !audioPanel.hidden`));
+  check(`${tag} Listen: now-playing title is the id`, await evl(`npTitle.textContent === ${JSON.stringify(CID)}`));
 
-// --- Cast ---
-await click('btnCast');
-const castCall = await untilPage(`window.__haCalls[0] ?? null`);
-check('Cast: webhook called once', !!castCall && await evl(`window.__haCalls.length === 1`));
-check('Cast: payload is {url, device}, url is the proxy /video', !!castCall
-  && castCall.body.url === VIDEO_URL
-  && castCall.body.device === 'basement-tv'
-  && Object.keys(castCall.body).length === 2,
-  JSON.stringify(castCall?.body));
-check('Cast: accepted status shown', await untilPage(`statusEl.textContent.includes('Cast request accepted (basement-tv)')`));
+  // --- Show video (exit audio mode) ---
+  await click('btnExitAudio');
+  check(`${tag} Exit audio: class removed, panel hidden`, await evl(`!document.body.classList.contains('audio-mode') && audioPanel.hidden`));
+  check(`${tag} Exit audio: media session metadata cleared`, await evl(`!('mediaSession' in navigator) || navigator.mediaSession.metadata === null`));
 
-// --- Cast to an audio-only target ---
-await evl(`deviceEl.value = 'amp'; deviceEl.dispatchEvent(new Event('change')); 'ok'`);
-await click('btnCast');
-const audioCast = await untilPage(`window.__haCalls[1] ?? null`);
-check('Cast: audio-only device is sent /audio', !!audioCast
-  && audioCast.body.url === AUDIO_URL
-  && audioCast.body.device === 'amp',
-  JSON.stringify(audioCast?.body));
+  // --- Stream again while the audio stream is active (teardown branch) ---
+  hits.length = 0;
+  await click('btnPreview');
+  check(`${tag} Restream: src swapped back to video`, await evl(`video.src === ${JSON.stringify(U.video)}`));
+  check(`${tag} Restream: backend hit again`, !!(await waitHit(P.video)));
 
-// --- Stop cast ---
-await click('btnStop');
-const stopCall = await untilPage(`window.__haCalls[2] ?? null`);
-check('Stop: payload is {device}', !!stopCall && stopCall.body.device === 'amp' && Object.keys(stopCall.body).length === 1, JSON.stringify(stopCall?.body));
+  // --- Cast ---
+  await click('btnCast');
+  const castCall = await untilPage(`window.__haCalls[0] ?? null`);
+  check(`${tag} Cast: webhook called once`, !!castCall && await evl(`window.__haCalls.length === 1`));
+  check(`${tag} Cast: payload is {url, device}, url is the video URL`, !!castCall
+    && castCall.body.url === U.video
+    && castCall.body.device === 'basement-tv'
+    && Object.keys(castCall.body).length === 2,
+    JSON.stringify(castCall?.body));
+  check(`${tag} Cast: accepted status shown`, await untilPage(`statusEl.textContent.includes('Cast request accepted (basement-tv)')`));
+
+  // --- Cast to an audio-only target ---
+  await evl(`deviceEl.value = 'amp'; deviceEl.dispatchEvent(new Event('change')); 'ok'`);
+  await click('btnCast');
+  const audioCast = await untilPage(`window.__haCalls[1] ?? null`);
+  check(`${tag} Cast: audio-only device is sent the audio URL`, !!audioCast
+    && audioCast.body.url === U.audio
+    && audioCast.body.device === 'amp',
+    JSON.stringify(audioCast?.body));
+
+  // --- Stop cast ---
+  await click('btnStop');
+  const stopCall = await untilPage(`window.__haCalls[2] ?? null`);
+  check(`${tag} Stop: payload is {device}`, !!stopCall && stopCall.body.device === 'amp' && Object.keys(stopCall.body).length === 1, JSON.stringify(stopCall?.body));
+}
+
+// Switching backends saves the choice and swaps the host field to that backend's own
+// saved host and default.
+async function selectBackend(value) {
+  await evl(`backendEl.value = ${JSON.stringify(value)}; backendEl.dispatchEvent(new Event('change')); 'ok'`);
+}
+
+await streamFlows('proxy');
+
+// --- Switch to go-acestream-engine ---
+await selectBackend('engine');
+check('Backend: choice saved on change', await evl(`localStorage.getItem('backend') === 'engine'`));
+check('Backend: engine host starts empty, placeholder is its default',
+  await evl(`hostEl.value === '' && hostEl.placeholder === BACKENDS.engine.defaultHost && BACKENDS.engine.defaultHost !== BACKENDS.proxy.defaultHost`),
+  await evl(`JSON.stringify([hostEl.value, hostEl.placeholder])`));
+// With no host typed the URL goes to the default host; the stub can't answer that, so only
+// the URL the page builds is checked, not a request.
+check('Backend: an empty host means the engine default',
+  await evl(`videoUrl(settings.target()) === 'http://' + BACKENDS.engine.defaultHost + ${JSON.stringify(PATHS.engine.video)}`),
+  await evl(`videoUrl(settings.target())`));
+await evl(`hostEl.value = '127.0.0.1:${PORT}'; 'ok'`);
+await streamFlows('engine');
+check('Backend: engine host saved under its own key, proxy host untouched', await evl(`
+  localStorage.getItem('goEngineHost') === '127.0.0.1:${PORT}' &&
+  localStorage.getItem('engineHost') === '127.0.0.1:${PORT}'
+`));
+
+// --- Switching back restores the proxy's host; the engine's survives a different one ---
+await selectBackend('proxy');
+await evl(`hostEl.value = 'proxy.example:1'; settings.target(); 'ok'`);
+await selectBackend('engine');
+check('Backend: switching shows the selected backend\'s saved host', await evl(`hostEl.value === '127.0.0.1:${PORT}'`), await evl(`hostEl.value`));
+await selectBackend('proxy');
+check('Backend: switching back restores the other one', await evl(`hostEl.value === 'proxy.example:1' && hostEl.placeholder === BACKENDS.proxy.defaultHost`), await evl(`hostEl.value`));
+await evl(`hostEl.value = '127.0.0.1:${PORT}'; settings.target(); 'ok'`);
 
 // --- Persistence ---
 check('Persist: id/host saved', await evl(`
@@ -227,7 +284,7 @@ check('Persist: cast device saved on change', await evl(`localStorage.getItem('c
 await evl(`wakeEl.checked = true; wakeEl.dispatchEvent(new Event('change')); 'ok'`);
 check('Persist: keep-screen-on saved on change', await evl(`localStorage.getItem('keepScreenOn') === 'true'`));
 
-// --- Ids the proxy would refuse never reach it ---
+// --- Ids a backend would refuse never reach it ---
 for (const [label, bad] of [['empty', ''], ['non-hex', 'zz'.repeat(20)], ['39 chars', 'a'.repeat(39)]]) {
   hits.length = 0;
   await evl(`idEl.value = ${JSON.stringify(bad)}; 'ok'`);
@@ -237,18 +294,22 @@ for (const [label, bad] of [['empty', ''], ['non-hex', 'zz'.repeat(20)], ['39 ch
   }
   const want = bad === '' ? 'Enter an AceStream ID first.' : 'AceStream ID must be 40 hex characters.';
   check(`Bad id (${label}): refused with a hint`, await evl(`statusEl.textContent === ${JSON.stringify(want)}`), await evl(`statusEl.textContent`));
-  check(`Bad id (${label}): proxy and HA not contacted`, hits.length === 0 && await evl(`window.__haCalls.length === 3`), JSON.stringify(hits));
+  check(`Bad id (${label}): backend and HA not contacted`, hits.length === 0 && await evl(`window.__haCalls.length === 3`), JSON.stringify(hits));
   check(`Bad id (${label}): saved id untouched`, await evl(`localStorage.getItem('acestreamId') === ${JSON.stringify(CID)}`));
 }
 await evl(`idEl.value = ${JSON.stringify(CID)}; 'ok'`);
 
 // --- Reload restores settings (incl. device select needing options first) ---
 await navigate(`http://127.0.0.1:${PORT}/index.html`);
-check('Reload: inputs + device + wake restored', await evl(`
+check('Reload: inputs + device + wake + backend restored', await evl(`
   idEl.value === ${JSON.stringify(CID)} && hostEl.value === '127.0.0.1:${PORT}' &&
-  deviceEl.value === 'living-room-tv' && wakeEl.checked === true
+  deviceEl.value === 'living-room-tv' && wakeEl.checked === true && backendEl.value === 'proxy'
 `));
-check('Reload: host placeholder is the default proxy', await evl(`hostEl.placeholder === DEFAULT_HOST && DEFAULT_HOST.length > 0`));
+check('Reload: host placeholder is the default proxy host', await evl(`hostEl.placeholder === BACKENDS.proxy.defaultHost && BACKENDS.proxy.defaultHost.length > 0`));
+// A saved backend the page no longer knows falls back to the default instead of a blank select.
+await evl(`localStorage.setItem('backend', 'gone'); 'ok'`);
+await navigate(PAGE_URL);
+check('Reload: an unknown saved backend falls back to the proxy', await evl(`backendEl.value === 'proxy' && hostEl.placeholder === BACKENDS.proxy.defaultHost`), await evl(`backendEl.value`));
 
 // --- Wake lock: overlapping triggers take one lock, not one each ---
 // A stub whose request resolves late, so the second trigger lands while the first is
@@ -283,6 +344,15 @@ check('Refused stream: reported as refused, not as a play() rejection',
   await untilPage(`statusEl.textContent.startsWith('Stream refused or not playable (')`) && await evl(`statusEl.textContent.includes('proxy log')`),
   await evl(`statusEl.textContent`));
 console.log('      status was: ' + await evl(`statusEl.textContent`));
+// The same refusal from the engine points at the engine's log.
+hits.length = 0;
+await selectBackend('engine');
+await click('btnPreview');
+check('Refused stream: engine asked on its own path', (await waitHit(ERR_CID)) === `/streams/content/${ERR_CID}/video.mp4`, JSON.stringify(hits));
+check('Refused stream: engine refusal points at the engine log',
+  await untilPage(`statusEl.textContent.startsWith('Stream refused or not playable (') && statusEl.textContent.includes('engine log')`),
+  await evl(`statusEl.textContent`));
+await selectBackend('proxy');
 
 // --- Open in VLC: offered only on iPhone/iPad ---
 check('VLC: button hidden on a desktop browser', await evl(`document.getElementById('btnVlc').hidden`));
@@ -292,7 +362,7 @@ await send('Emulation.setUserAgentOverride', {
   userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15',
 });
 await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-await navigate(`http://127.0.0.1:${PORT}/index.html`);
+await navigate(PAGE_URL);
 check('VLC: button shown on an iPad', await evl(`!document.getElementById('btnVlc').hidden`));
 
 // The refused id above was saved, so the reload brought it back: a stream that fails here
@@ -303,7 +373,6 @@ check('VLC: a failed stream on an iPad points at VLC, not the proxy log',
   await evl(`statusEl.textContent`));
 
 await evl(`idEl.value = ${JSON.stringify(CID)}; 'ok'`);
-const PAGE_URL = `http://127.0.0.1:${PORT}/index.html`;
 const vlcHref = await evl(`vlcUrl(videoUrl(settings.target()))`);
 check('VLC: x-callback URL carries the encoded /video URL and a way back',
   vlcHref === 'vlc-x-callback://x-callback-url/stream'
@@ -322,6 +391,15 @@ check('VLC: status says where the stream went', await untilPage(`statusEl.textCo
 // overwrite the hand-off message.
 await sleep(500);
 check('VLC: hand-off status survives the stopped stream', await evl(`statusEl.textContent.startsWith('Opening in VLC: ')`), await evl(`statusEl.textContent`));
+
+// On the engine VLC is handed the engine's video URL.
+await selectBackend('engine');
+const engineVlc = await evl(`vlcUrl(videoUrl(settings.target()))`);
+check('VLC: on the engine the x-callback URL carries the engine video URL',
+  engineVlc === 'vlc-x-callback://x-callback-url/stream'
+    + `?url=${encodeURIComponent(urls('engine').video)}&x-success=${encodeURIComponent(PAGE_URL)}`,
+  engineVlc);
+await selectBackend('proxy');
 await send('Emulation.setTouchEmulationEnabled', { enabled: false });
 
 const realErrors = pageErrors.filter(t => !/MediaError/i.test(t));
