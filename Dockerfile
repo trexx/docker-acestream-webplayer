@@ -9,6 +9,5 @@ RUN find /app -name '*.html' -exec gzip -9 {} +
 
 # Compile scratch image
 FROM scratch AS compile
-LABEL org.opencontainers.image.source="https://github.com/trexx/docker-acestream-webplayer"
 
 COPY --from=website /app /
