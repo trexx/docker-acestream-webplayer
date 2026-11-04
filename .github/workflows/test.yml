@@ -13,7 +13,7 @@ jobs:
     permissions:
       contents: 'read'
     steps:
-      - uses: 'trexx/actions/.github/actions/checkout@shared-steps'
+      - uses: 'trexx/actions/.github/actions/checkout@main'
       # The runner image ships google-chrome and Node 22; the test needs nothing else.
       - run: 'node test/flows.mjs'
         env:
