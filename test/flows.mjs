@@ -63,9 +63,21 @@ const browser = spawn(BROWSER_BIN, [
   '--no-first-run', '--no-default-browser-check', '--disable-component-update',
   '--disable-background-networking', '--disable-sync', '--disable-extensions',
   '--remote-debugging-port=0', 'about:blank',
-], { stdio: 'ignore', detached: true });
+], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
 const killBrowser = signal => { try { process.kill(-browser.pid, signal); } catch {} };
 process.on('SIGINT', () => { killBrowser('SIGKILL'); process.exit(130); });
+// stderr is kept (the tail only) so a browser that never comes up can say why; it has
+// to be drained regardless, or a chatty browser blocks once the pipe buffer fills.
+let browserLog = '';
+browser.stderr.on('data', d => { browserLog = (browserLog + d).slice(-4000); });
+let browserExit = null;
+browser.once('exit', (code, signal) => { browserExit = signal ?? `code ${code}`; });
+const browserStarted = Date.now();
+// Google Chrome on the GitHub runner takes 10-13 s from spawn to its DevTools port —
+// against well under a second locally — and one run took longer than the 15 s this
+// used to allow, failing with the browser still starting. The wait ends early if the
+// browser exits, so a generous bound only costs time when the browser really hangs.
+const STARTUP_MS = 60000;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // Poll until `fn` returns something truthy or `ms` runs out; returns the last value.
@@ -80,17 +92,25 @@ const until = async (fn, ms = 6000, step = 100) => {
 
 // port 0 avoids collisions; the browser reports the real port via its profile dir
 const dbgPort = await until(() => {
+  if (browserExit) return 'exited';
   const f = join(profileDir, 'DevToolsActivePort');
   return existsSync(f) ? parseInt(readFileSync(f, 'utf8').split('\n')[0], 10) : null;
-}, 15000, 250);
-if (!dbgPort) throw new Error(`browser did not start (BROWSER_BIN=${BROWSER_BIN})`);
+}, STARTUP_MS, 250);
+if (typeof dbgPort !== 'number' || !dbgPort) {
+  killBrowser('SIGKILL');
+  try { rmSync(profileDir, { recursive: true, force: true }); } catch {}
+  const why = browserExit ? `exited (${browserExit})` : `no DevTools port after ${STARTUP_MS / 1000} s`;
+  throw new Error(`browser did not start (BROWSER_BIN=${BROWSER_BIN}): ${why}\n--- browser stderr (tail) ---\n${browserLog}`);
+}
+// Logged so a creeping startup time shows up in CI logs before it becomes a failure.
+console.log(`      browser up in ${((Date.now() - browserStarted) / 1000).toFixed(1)} s`);
 
 const page = await until(async () => {
   try {
     const targets = await (await fetch(`http://127.0.0.1:${dbgPort}/json`)).json();
     return targets.find(t => t.type === 'page');
   } catch { return null; }
-}, 15000, 250);
+}, STARTUP_MS, 250);
 if (!page) throw new Error('no page target on the DevTools endpoint');
 
 const ws = new WebSocket(page.webSocketDebuggerUrl);
